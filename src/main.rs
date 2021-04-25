@@ -14,7 +14,7 @@ use defmt::{error, info, unwrap};
 use defmt_rtt as _;
 use embassy::executor::Spawner;
 use embassy::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, Result};
-use embassy::util::Forever;
+use embassy::util::{Forever, Signal};
 use panic_probe as _;
 
 use embassy_nrf::buffered_uarte::BufferedUarte;
@@ -22,6 +22,7 @@ use embassy_nrf::gpio::NoPin;
 use embassy_nrf::{interrupt, peripherals, uarte, Peripherals};
 
 mod serial_cmds;
+use serial_cmds::TwiCmd;
 
 trait AsyncReadWrite: AsyncBufRead + AsyncWrite {}
 
@@ -47,7 +48,7 @@ impl<'a> AsyncWrite for Serial<'a> {
 }
 
 #[embassy::task]
-async fn serial_task(mut serial: Serial<'static>) {
+async fn serial_task(mut serial: Serial<'static>, cmd_sig: &'static Signal<TwiCmd>) {
     info!("serial initialized");
 
     unwrap!(serial.write_all(b"Hello Serial!\r\n").await);
@@ -66,14 +67,42 @@ async fn serial_task(mut serial: Serial<'static>) {
 
         match serial_cmds::parse_cmd(&buf) {
             Ok(Some(cmd)) => {
-                let mut resp_buf = arrayvec::ArrayString::<32>::new();
-                if let Err(e) = write!(&mut resp_buf, "cmd: {:?}\n\r", cmd) {
-                    write!(&mut resp_buf, "error: {}", e).unwrap();
+                let mut resp_buf = arrayvec::ArrayString::<128>::new();
+                if let Err(_) = write!(&mut resp_buf, "cmd: {:?}\n\r", cmd) {
+                    error!("error formatting cmd: {}", (&resp_buf as &str));
                 };
                 unwrap!(serial.write_all(resp_buf.as_bytes()).await);
+                cmd_sig.signal(cmd);
             }
             Ok(None) => info!("no cmd"),
             Err(e) => error!("err: {} at {}", e.msg, e.pos),
+        }
+    }
+}
+
+#[embassy::task]
+async fn twi_task(cmd_sig: &'static Signal<TwiCmd>) {
+    loop {
+        let cmd = cmd_sig.wait().await;
+        match cmd {
+            TwiCmd::Write(cmd) => {
+                info!(
+                    "write({}, {})",
+                    cmd.addr,
+                    &cmd.data.buf[0..cmd.data.len as usize]
+                );
+            }
+            TwiCmd::Read(addr, count) => {
+                info!("read({}, #{})", addr, count)
+            }
+            TwiCmd::WriteRead(cmd, count) => {
+                info!(
+                    "write({}, {}), read(#{})",
+                    cmd.addr,
+                    &cmd.data.buf[0..cmd.data.len as usize],
+                    count
+                )
+            }
         }
     }
 }
@@ -82,6 +111,7 @@ type Uarte = BufferedUarte<'static, peripherals::UARTE0, peripherals::TIMER0>;
 impl<'a> AsyncReadWrite for Uarte {}
 
 static UARTE: Forever<Uarte> = Forever::new();
+static TWICMD_SIGNAL: Forever<Signal<TwiCmd>> = Forever::new();
 
 #[embassy::main]
 async fn main(spawner: Spawner) {
@@ -113,5 +143,8 @@ async fn main(spawner: Spawner) {
     let serial = Serial {
         uart: Pin::static_mut(uart),
     };
-    unwrap!(spawner.spawn(serial_task(serial)));
+
+    let cmd_sig = TWICMD_SIGNAL.put(Signal::new());
+    unwrap!(spawner.spawn(serial_task(serial, cmd_sig)));
+    unwrap!(spawner.spawn(twi_task(cmd_sig)));
 }
