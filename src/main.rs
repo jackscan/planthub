@@ -6,10 +6,11 @@
 #![feature(type_alias_impl_trait)]
 #![allow(incomplete_features)]
 
+use core::fmt::Write;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
-use defmt::{info, unwrap};
+use defmt::{error, info, unwrap};
 use defmt_rtt as _;
 use embassy::executor::Spawner;
 use embassy::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, Result};
@@ -19,6 +20,8 @@ use panic_probe as _;
 use embassy_nrf::buffered_uarte::BufferedUarte;
 use embassy_nrf::gpio::NoPin;
 use embassy_nrf::{interrupt, peripherals, uarte, Peripherals};
+
+mod serial_cmds;
 
 trait AsyncReadWrite: AsyncBufRead + AsyncWrite {}
 
@@ -60,6 +63,18 @@ async fn serial_task(mut serial: Serial<'static>) {
 
         unwrap!(serial.write_all(&buf).await);
         unwrap!(serial.write_all(b"\r\n").await);
+
+        match serial_cmds::parse_cmd(&buf) {
+            Ok(Some(cmd)) => {
+                let mut resp_buf = arrayvec::ArrayString::<32>::new();
+                if let Err(e) = write!(&mut resp_buf, "cmd: {:?}\n\r", cmd) {
+                    write!(&mut resp_buf, "error: {}", e).unwrap();
+                };
+                unwrap!(serial.write_all(resp_buf.as_bytes()).await);
+            }
+            Ok(None) => info!("no cmd"),
+            Err(e) => error!("err: {} at {}", e.msg, e.pos),
+        }
     }
 }
 
