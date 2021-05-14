@@ -24,6 +24,8 @@ use embassy_nrf::{interrupt, peripherals, uarte, Peripherals};
 mod serial_cmds;
 use serial_cmds::TwiCmd;
 
+mod twim;
+
 trait AsyncReadWrite: AsyncBufRead + AsyncWrite {}
 
 struct Serial<'a> {
