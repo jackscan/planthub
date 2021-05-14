@@ -17,6 +17,9 @@ embassy-nrf = {version = "0.1.0", features = ["defmt", "52832"]}
 embassy-traits = {version = "0.1.0", features = ["defmt"]}
 futures = {version = "0.3.15", default-features = false}
 panic-probe = "0.2.0"
+futures-intrusive = { version = "0.4.0", default-features = false }
+futures-util = { version = "0.3.15", default-features = false }
+
 [dependencies.nrf52832-hal]
 default-features = false
 features = ["xxAA-package", "rt"]
