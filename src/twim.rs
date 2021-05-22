@@ -290,8 +290,9 @@ impl<'a> Transfer<'a> {
         let r = self.regs;
         let s = self.state;
 
+        s.end_waker.register(cx.waker());
         if r.events_stopped.read().bits() == 0 {
-            s.end_waker.register(cx.waker());
+            trace!("transfer pending");
             return Poll::Pending;
         }
 
