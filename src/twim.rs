@@ -165,6 +165,7 @@ impl<'a> StopSwitch<'a> {
     }
 }
 
+#[derive(defmt::Format)]
 enum TransferSetup<'a> {
     Read(&'a mut [u8]),
     Write(&'a [u8]),
@@ -181,30 +182,43 @@ pub struct Transfer<'a> {
     regs: &'static pac::twim0::RegisterBlock,
     state: &'static sealed::State,
     run_state: TransferState<'a>,
-    _pd: PhantomData<&'a mut Twim>,
+    _pd: PhantomData<&'a mut ()>,
 }
 
 impl<'a> Transfer<'a> {
     fn new(twim: &'a mut Twim, addr: Address, setup: TransferSetup<'a>) -> Self {
+        trace!("new transfer to {:x}", addr);
         Self {
             regs: twim.regs,
             state: twim.state,
             run_state: TransferState::Setup(addr, setup),
-            _pd: PhantomData::<&'a mut Twim>,
+            _pd: PhantomData,
         }
     }
 
-    fn setup(&mut self, addr: Address, setup: TransferSetup<'a>) -> Result<(), Error> {
+    fn start(&mut self, addr: Address, setup: TransferSetup<'a>) -> Result<(), Error> {
         match setup {
             TransferSetup::Read(recv_buffer) => {
                 check_rx_buffer(recv_buffer)?;
                 self.init_transfer(addr)?;
                 unsafe { self.setup_rx(recv_buffer) };
+
+                let r = self.regs;
+                // Enable shortcut between event LASTRX and task STOP.
+                r.shorts.write(|w| w.lastrx_stop().enabled());
+                // Start receive.
+                r.tasks_startrx.write(|w| unsafe { w.bits(1) });
             }
             TransferSetup::Write(send_buffer) => {
                 check_tx_buffer(send_buffer)?;
                 self.init_transfer(addr)?;
                 unsafe { self.setup_tx(send_buffer) };
+
+                let r = self.regs;
+                // Enable shortcut between event LASTTX and task STOP.
+                r.shorts.write(|w| w.lasttx_stop().enabled());
+                // Start transmission.
+                r.tasks_starttx.write(|w| unsafe { w.bits(1) });
             }
             TransferSetup::WriteRead(send_buffer, recv_buffer) => {
                 check_tx_buffer(send_buffer)?;
@@ -212,41 +226,25 @@ impl<'a> Transfer<'a> {
                 self.init_transfer(addr)?;
                 unsafe { self.setup_tx(send_buffer) };
                 unsafe { self.setup_rx(recv_buffer) };
+
+                let r = self.regs;
+                // Enable shortcuts between event LASTTX and STARTRX,
+                // and event LASTRX and task STOP.
+                r.shorts
+                    .write(|w| w.lasttx_startrx().enabled().lastrx_stop().enabled());
+                // Start transmission.
+                r.tasks_starttx.write(|w| unsafe { w.bits(1) });
             }
         }
         Ok(())
     }
-
-    // fn check_setup(&'a mut self) -> Result<(), Error> {
-    //     if let TransferState::Setup(addr, ref mut setup) = self.run_state {
-    //         match setup {
-    //             TransferSetup::Read(recv_buffer) => {
-    //                 check_rx_buffer(recv_buffer)?;
-    //                 self.init_transfer(addr)?;
-    //                 unsafe { self.setup_rx(recv_buffer) };
-    //             }
-    //             TransferSetup::Write(send_buffer) => {
-    //                 check_tx_buffer(send_buffer)?;
-    //                 self.init_transfer(addr)?;
-    //                 unsafe { self.setup_tx(send_buffer) };
-    //             }
-    //             TransferSetup::WriteRead(send_buffer, recv_buffer) => {
-    //                 check_tx_buffer(send_buffer)?;
-    //                 check_rx_buffer(recv_buffer)?;
-    //                 self.init_transfer(addr)?;
-    //                 unsafe { self.setup_tx(send_buffer) };
-    //                 unsafe { self.setup_rx(recv_buffer) };
-    //             }
-    //         }
-    //     }
-    //     Ok(())
-    // }
 
     fn init_transfer(&mut self, addr: Address) -> Result<(), Error> {
         let r = self.regs;
         // While interrupt for event STOPPED is enabled another transaction is in progress.
         if r.inten.read().stopped().is_enabled() {
             // TODO: Shall we await stop() instead of returning an error?
+            // XXX: This should not happen since future can not be dropped without awaiting stopped.
             return Err(Error::Busy);
         }
         // set target address
@@ -300,6 +298,7 @@ impl<'a> Transfer<'a> {
         Poll::Ready(if r.events_error.read().bits() == 0 {
             Ok(())
         } else {
+            trace!("transfer error {:x}", r.errorsrc.read().bits());
             Err(match r.errorsrc.read() {
                 e if e.anack().is_received() => Error::AddressNack,
                 e if e.dnack().is_received() => Error::DataNack,
@@ -322,18 +321,22 @@ impl<'a> Future for Transfer<'a> {
 
         this.run_state = match core::mem::replace(&mut this.run_state, TransferState::Empty) {
             TransferState::Setup(addr, setup) => {
-                this.setup(addr, setup)?;
+                trace!("transfer setup {}", setup);
+                this.start(addr, setup)?;
                 TransferState::Running(DropBomb::new())
             }
             TransferState::Empty => panic!("Polling empty transfer"),
-            state => state,
+            state => {
+                trace!("transfer poll");
+                state
+            }
         };
 
         let pr = this.poll_end(cx);
         if let Poll::Ready(_) = pr {
             match core::mem::replace(&mut this.run_state, TransferState::Empty) {
                 TransferState::Running(bomb) => bomb.defuse(),
-                _ => panic!("Invalid transfer state"),
+                _ => unreachable!(),
             }
         }
         pr
