@@ -286,7 +286,7 @@ impl<'a> Transfer<'a> {
             .write(|w| unsafe { w.maxcnt().bits(buffer.len() as _) });
     }
 
-    fn poll_end(&self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+    fn poll_end(&self, cx: &mut Context<'_>) -> Poll<Result<(usize, usize), Error>> {
         let r = self.regs;
         let s = self.state;
 
@@ -297,7 +297,10 @@ impl<'a> Transfer<'a> {
         }
 
         Poll::Ready(if r.events_error.read().bits() == 0 {
-            Ok(())
+            let write = r.txd.amount.read().bits() as usize;
+            let read = r.rxd.amount.read().bits() as usize;
+            trace!("transfer finished");
+            Ok((write, read))
         } else {
             trace!("transfer error {:x}", r.errorsrc.read().bits());
             Err(match r.errorsrc.read() {
@@ -312,7 +315,7 @@ impl<'a> Transfer<'a> {
 }
 
 impl<'a> Future for Transfer<'a> {
-    type Output = Result<(), Error>;
+    type Output = Result<(usize, usize), Error>;
 
     fn poll(
         self: core::pin::Pin<&mut Self>,

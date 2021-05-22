@@ -232,7 +232,7 @@ async fn twi_transfer(
                 .write(cmd.addr, &cmd.data.buf[0..cmd.data.len as usize])
                 .await;
             match &r {
-                // Ok(n) => writeln_serial!(serial, "{} bytes written", n),
+                Ok((n, _)) => writeln_serial!(serial, "{} bytes written", n),
                 Err(e) => writeln_serial!(serial, "write failed: {:?}", e),
                 _ => {}
             }
@@ -248,7 +248,7 @@ async fn twi_transfer(
             let buf = &mut buf[0..count];
             let r = twim.read(addr, buf).await;
             match &r {
-                // Ok(n) => writeln_serial!(serial, "read {} bytes: {:?}", n, buf),
+                Ok((_, n)) => writeln_serial!(serial, "read {} bytes: {:?}", n, buf),
                 Err(e) => writeln_serial!(serial, "read failed: {:?}", e),
                 _ => {}
             }
@@ -272,9 +272,9 @@ async fn twi_transfer(
                 .write_read(cmd.addr, &cmd.data.buf[0..cmd.data.len as usize], buf)
                 .await;
             match &r {
-                // Ok((w, r)) => {
-                //     writeln_serial!(serial, "{} bytes written, {} bytes read: {:?}", w, r, buf)
-                // }
+                Ok((w, r)) => {
+                    writeln_serial!(serial, "{} bytes written, {} bytes read: {:?}", w, r, buf)
+                }
                 Err(e) => writeln_serial!(serial, "write/read failed: {:?}", e),
                 _ => {}
             }
