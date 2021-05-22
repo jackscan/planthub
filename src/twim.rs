@@ -37,6 +37,11 @@ pub struct Twim {
     state: &'static sealed::State,
 }
 
+pub struct StopSwitch<'a> {
+    regs: &'static pac::twim0::RegisterBlock,
+    _pd: PhantomData<&'a ()>,
+}
+
 impl Twim {
     pub fn new<T: Instance>(
         _twim: impl Unborrow<Target = T>,
@@ -121,30 +126,16 @@ impl Twim {
         }
     }
 
-    // pub fn read<'a, const N: usize>(
-    //     &'a mut self,
-    //     address: Address,
-    // ) -> impl Future<Output = Result<arrayvec::ArrayVec<u8, N>, Error>> + 'a where
-    // {
-    //     async move {
-    //         let mut buffer = arrayvec::ArrayVec::<u8, N>::new_const();
-    //         // buffer will be filled by DMA
-    //         unsafe{ buffer.set_len(N) };
-    //         Self::check_rx_buffer(&buffer)?;
-    //         self.init_transfer(address)?;
-    //         self.setup_rx(&mut buffer);
-
-    //         let r = self.regs;
-    //         // Enable shortcut between event LASTRX and task STOP.
-    //         r.shorts.write(|w| w.lastrx_stop().enabled());
-    //         // Start receive.
-    //         r.tasks_startrx.write(|w| unsafe { w.bits(1) });
-
-    //         self.wait().await?;
-    //         buffer.set_len(r.rxd.amount.read().bits() as usize);
-    //         Ok(buffer)
-    //     }
-    // }
+    pub fn borrow_stoppable<'a>(&'a mut self) -> (&'a mut Self, StopSwitch<'a>) {
+        let r = self.regs;
+        (
+            self,
+            StopSwitch {
+                regs: r,
+                _pd: PhantomData,
+            },
+        )
+    }
 
     pub fn read<'a>(&'a mut self, address: Address, buffer: &'a mut [u8]) -> Transfer<'a> {
         Transfer::new(self, address, TransferSetup::Read(buffer))
@@ -166,49 +157,12 @@ impl Twim {
             TransferSetup::WriteRead(send_buffer, recv_buffer),
         )
     }
+}
 
-    // pub async fn write(&mut self, address: Address, buffer: &[u8]) -> Result<usize, Error> {
-    //     Self::check_tx_buffer(buffer)?;
-    //     self.init_transfer(address)?;
-    //     self.setup_tx(buffer);
-
-    //     let r = self.regs;
-    //     // Enable shortcut between event LASTTX and task STOP.
-    //     r.shorts.write(|w| w.lasttx_stop().enabled());
-    //     // Start transmission.
-    //     r.tasks_starttx.write(|w| unsafe { w.bits(1) });
-
-    //     self.wait().await?;
-    //     Ok(r.txd.amount.read().bits() as usize)
-    // }
-
-    // pub async fn write_read(
-    //     &mut self,
-    //     address: Address,
-    //     send_buffer: &[u8],
-    //     recv_buffer: &mut [u8],
-    // ) -> Result<(usize, usize), Error> {
-    //     Self::check_tx_buffer(send_buffer)?;
-    //     Self::check_rx_buffer(recv_buffer)?;
-    //     self.init_transfer(address)?;
-    //     self.setup_tx(send_buffer);
-    //     self.setup_rx(recv_buffer);
-
-    //     let r = self.regs;
-    //     // Enable shortcuts between event LASTTX and STARTRX,
-    //     // and event LASTRX and task STOP.
-    //     r.shorts
-    //         .write(|w| w.lasttx_startrx().enabled().lastrx_stop().enabled());
-    //     // Start transmission.
-    //     r.tasks_starttx.write(|w| unsafe { w.bits(1) });
-
-    //     self.wait().await?;
-
-    //     Ok((
-    //         r.txd.amount.read().bits() as usize,
-    //         r.rxd.amount.read().bits() as usize,
-    //     ))
-    // }
+impl<'a> StopSwitch<'a> {
+    pub fn stop(&mut self) {
+        self.regs.tasks_stop.write(|w| unsafe { w.bits(1) });
+    }
 }
 
 enum TransferSetup<'a> {
@@ -354,18 +308,6 @@ impl<'a> Transfer<'a> {
                 _ => unreachable!(),
             })
         })
-    }
-
-    pub async fn stop(self) {
-        if let TransferState::Running(_) = self.run_state {
-            self.regs.tasks_stop.write(|w| unsafe { w.bits(1) });
-            futures::future::poll_fn(|cx| self.poll_end(cx)).await;
-            if let TransferState::Running(bomb) = self.run_state {
-                bomb.defuse();
-            } else {
-                unreachable!();
-            }
-        }
     }
 }
 
