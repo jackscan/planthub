@@ -2,17 +2,20 @@ use core::future::Future;
 use core::marker::PhantomData;
 use core::task::{Context, Poll};
 
-use defmt::info;
+use defmt::trace;
 use embassy::interrupt::{Interrupt, InterruptExt};
 use embassy::util::{AtomicWaker, DropBomb, Unborrow};
 use embassy_extras::unborrow;
 pub use embassy_traits::i2c::SevenBitAddress as Address;
 
-use embassy_nrf::target_constants::*;
-use embassy_nrf::{gpio, interrupt};
+use embassy_nrf::{gpio, interrupt, peripherals};
 use hal::pac;
 pub use hal::twim::Frequency;
 use nrf52832_hal as hal;
+
+const EASY_DMA_SIZE: usize = (1 << 8) - 1;
+const SRAM_LOWER: usize = 0x2000_0000;
+const SRAM_UPPER: usize = 0x3000_0000;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, defmt::Format)]
 pub enum Error {
@@ -432,11 +435,6 @@ fn check_tx_buffer(buffer: &[u8]) -> Result<(), Error> {
     }
 }
 
-trait TwimInstance {
-    fn get_regs(&self) -> &'static pac::twim0::RegisterBlock;
-    fn get_state(&self) -> &'static sealed::State;
-}
-
 mod sealed {
     use super::*;
 
@@ -462,24 +460,11 @@ pub trait Instance: sealed::Instance + 'static {
     type Interrupt: Interrupt;
 }
 
-impl<T: sealed::Instance> TwimInstance for T {
-    fn get_regs(&self) -> &'static pac::twim0::RegisterBlock {
-        T::regs()
-    }
-    fn get_state(&self) -> &'static sealed::State {
-        T::state()
-    }
-}
-
 macro_rules! impl_instance {
-    ($type:ident, $irq:ident) => {
-        pub struct $type {
-            _private: (),
-        }
-
-        impl sealed::Instance for $type {
+    ($type:ident, $pac_type:ident, $irq:ident) => {
+        impl sealed::Instance for peripherals::$type {
             fn regs() -> &'static pac::twim0::RegisterBlock {
-                unsafe { &*pac::$type::ptr() }
+                unsafe { &*pac::$pac_type::ptr() }
             }
             fn state() -> &'static sealed::State {
                 static STATE: sealed::State = sealed::State::new();
@@ -487,33 +472,11 @@ macro_rules! impl_instance {
             }
         }
 
-        impl Instance for $type {
+        impl Instance for peripherals::$type {
             type Interrupt = interrupt::$irq;
-        }
-
-        impl embassy::util::Steal for $type {
-            unsafe fn steal() -> Self {
-                Self { _private: () }
-            }
-        }
-
-        impl embassy::util::Unborrow for $type {
-            type Target = $type;
-            #[inline]
-            unsafe fn unborrow(self) -> $type {
-                self
-            }
-        }
-
-        impl embassy::util::Unborrow for &mut $type {
-            type Target = $type;
-            #[inline]
-            unsafe fn unborrow(self) -> $type {
-                ::core::ptr::read(self)
-            }
         }
     };
 }
 
-impl_instance!(TWIM0, SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0);
-impl_instance!(TWIM1, SPIM1_SPIS1_TWIM1_TWIS1_SPI1_TWI1);
+impl_instance!(TWISPI0, TWIM0, SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0);
+impl_instance!(TWISPI1, TWIM1, SPIM1_SPIS1_TWIM1_TWIS1_SPI1_TWI1);

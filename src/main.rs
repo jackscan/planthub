@@ -313,9 +313,7 @@ static TWICMD_SIGNAL: Forever<Signal<TwiCmd>> = Forever::new();
 static SERIAL_CH: Forever<SerialChannel> = Forever::new();
 
 #[embassy::main]
-async fn main(spawner: Spawner) {
-    let p = Peripherals::take().unwrap();
-
+async fn main(spawner: Spawner, p: Peripherals) {
     let mut config = uarte::Config::default();
     config.parity = uarte::Parity::EXCLUDED;
     config.baudrate = uarte::Baudrate::BAUD115200;
@@ -342,7 +340,7 @@ async fn main(spawner: Spawner) {
     let uart = Pin::static_mut(uart);
 
     let twim = twim::Twim::new(
-        unsafe { twim::TWIM0::steal() },
+        p.TWISPI0,
         interrupt::take!(SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0),
         p.P0_26,
         p.P0_25,
