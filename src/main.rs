@@ -232,11 +232,10 @@ async fn twi_transfer(
                 .write(cmd.addr, &cmd.data.buf[0..cmd.data.len as usize])
                 .await;
             match &r {
-                Ok((n, _)) => writeln_serial!(serial, "{} bytes written", n),
+                Ok(()) => writeln_serial!(serial, "write succeeded"),
                 Err(e) => writeln_serial!(serial, "write failed: {:?}", e),
-                _ => {}
             }
-            r.map(|_| ())
+            r
         }
         TwiCmd::Read(addr, count) => {
             writeln_serial!(serial, "read({}, #{})", addr, count);
@@ -248,11 +247,10 @@ async fn twi_transfer(
             let buf = &mut buf[0..count];
             let r = twim.read(addr, buf).await;
             match &r {
-                Ok((_, n)) => writeln_serial!(serial, "read {} bytes: {:?}", n, buf),
+                Ok(()) => writeln_serial!(serial, "read: {:?}", buf),
                 Err(e) => writeln_serial!(serial, "read failed: {:?}", e),
-                _ => {}
             }
-            r.map(|_| ())
+            r
         }
         TwiCmd::WriteRead(cmd, count) => {
             writeln_serial!(
@@ -272,13 +270,10 @@ async fn twi_transfer(
                 .write_read(cmd.addr, &cmd.data.buf[0..cmd.data.len as usize], buf)
                 .await;
             match &r {
-                Ok((w, r)) => {
-                    writeln_serial!(serial, "{} bytes written, {} bytes read: {:?}", w, r, buf)
-                }
+                Ok(()) => writeln_serial!(serial, "read: {:?}", buf),
                 Err(e) => writeln_serial!(serial, "write/read failed: {:?}", e),
-                _ => {}
             }
-            r.map(|_| ())
+            r
         }
     }
 }
