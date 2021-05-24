@@ -17,10 +17,11 @@ use defmt_rtt as _;
 use embassy::executor::Spawner;
 use embassy::io;
 use embassy::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt};
-use embassy::util::{Forever, Signal, Steal};
+use embassy::time::{Duration, Timer};
+use embassy::util::{Forever, Signal};
 use futures::{pin_mut, Stream};
 use futures_intrusive::channel::LocalChannel;
-use futures_util::future::poll_fn;
+use futures_util::future::{poll_fn, Either};
 use panic_probe as _;
 
 use embassy_nrf::buffered_uarte::BufferedUarte;
@@ -289,14 +290,24 @@ async fn twi_task(
         let cmd = cmd_sig.wait().await;
         let mut buf = [0u8; 16];
 
-        match twi_transfer(&mut twim, cmd, &mut buf, &serial).await {
-            Ok(()) => {
-                info!("transfer finished");
-            }
-            Err(e) => {
-                info!("transfer failed: {}", e);
-            }
-        };
+        let (twim, stopper) = twim.borrow_stoppable();
+
+        {
+            let transfer = twi_transfer(twim, cmd, &mut buf, &serial);
+            pin_mut!(transfer);
+            let timer = Timer::after(Duration::from_millis(10));
+
+            let _ = match futures::future::select(transfer, timer).await {
+                Either::Left((r, _)) => r,
+                Either::Right((_, transfer)) => {
+                    stopper.stop();
+                    info!("stopping");
+                    // need to await the stopped transfer
+                    transfer.await
+                }
+            };
+        }
+
     }
 }
 
