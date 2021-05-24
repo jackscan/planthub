@@ -102,17 +102,16 @@ impl Twim {
             let r = T::regs();
             let s = T::state();
 
-            if r.events_error.read().bits() != 0 {
+            if r.events_stopped.read().bits() != 0 {
+                // Clearing interrupt can take up to four clock cycles.
+                r.intenclr.write(|w| w.stopped().clear().error().clear());
+                // wake up task
+                s.end_waker.wake();
+            } else if r.events_error.read().bits() != 0 {
                 // Clearing interrupt can take up to four clock cycles.
                 r.intenclr.write(|w| w.error().clear());
                 // stop TWIM on error
                 r.tasks_stop.write(|w| unsafe { w.bits(1) });
-            }
-            if r.events_stopped.read().bits() != 0 {
-                // Clearing interrupt can take up to four clock cycles.
-                r.intenclr.write(|w| w.stopped().clear());
-                // wake up task
-                s.end_waker.wake();
             }
         }
 
