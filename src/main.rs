@@ -33,6 +33,9 @@ use serial_cmds::TwiCmd;
 
 mod twim;
 
+mod weight_scale_drv;
+use weight_scale_drv::WeightScaleDrv;
+
 trait AsyncReadWrite: AsyncBufRead + AsyncWrite {}
 
 type SerialBuffer = [u8; 64];
@@ -275,6 +278,20 @@ async fn twi_transfer(
                 Err(e) => writeln_serial!(serial, "write/read failed: {:?}", e),
             }
             r
+        }
+        TwiCmd::ReadTemperature(addr) => {
+            writeln_serial!(serial, "reading temp");
+            let mut drv = WeightScaleDrv::new(twim, addr);
+            match drv.read_temperature().await {
+                Ok(temp) => {
+                    writeln_serial!(serial, "temperature: {}", temp);
+                    Ok(())
+                }
+                Err(e) => {
+                    writeln_serial!(serial, "reading temperature failed: {:?}", e);
+                    Err(e)
+                }
+            }
         }
     }
 }

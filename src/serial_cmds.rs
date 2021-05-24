@@ -19,6 +19,7 @@ pub enum TwiCmd {
     Write(TwiWrite),
     Read(TwiAddr, u8),
     WriteRead(TwiWrite, u8),
+    ReadTemperature(TwiAddr),
 }
 
 #[derive(Debug, defmt::Format)]
@@ -147,6 +148,9 @@ impl<'a> TwiCmdParser<'a> {
                         },
                         count,
                     )
+                }
+                "t" => {
+                    TwiCmd::ReadTemperature(self.parse_addr()?)
                 }
                 _ => return Err(ParseError::new("unknown command", p)),
             })
