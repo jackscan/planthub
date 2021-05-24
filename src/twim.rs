@@ -340,8 +340,14 @@ impl<'a> Future for Transfer<'a> {
                 TransferState::Running(bomb, txb, rxb) => {
                     bomb.defuse();
                     match res {
-                        Ok((txn, _)) if txn != txb => Poll::Ready(Err(Error::Transmit)),
-                        Ok((_, rxn)) if rxn != rxb => Poll::Ready(Err(Error::Receive)),
+                        Ok((txn, _)) if txb != 0 && txn != txb => {
+                            trace!("tx len:{} send:{}", txb, txn);
+                            Poll::Ready(Err(Error::Transmit))
+                        }
+                        Ok((_, rxn)) if rxb != 0 && rxn != rxb => {
+                            trace!("rx len:{} recv:{}", rxb, rxn);
+                            Poll::Ready(Err(Error::Receive))
+                        }
                         Ok(_) => Poll::Ready(Ok(())),
                         Err(e) => Poll::Ready(Err(e)),
                     }
