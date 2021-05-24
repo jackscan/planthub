@@ -1,25 +1,16 @@
-use core::{str};
+use core::fmt::Write;
+use core::str;
 
-pub type TwiAddr = u8;
+use defmt::{error, info};
+use futures_intrusive::channel::LocalChannel;
 
-#[derive(defmt::Format, Debug, Default)]
-pub struct TwiData {
-    pub len: u8,
-    pub buf: [u8; 7],
-}
+use crate::twim;
+use crate::weight_scale_drv::WeightScaleDrv;
 
-#[derive(defmt::Format, Debug)]
-pub struct TwiWrite {
-    pub addr: TwiAddr,
-    pub data: TwiData,
-}
-
-#[derive(defmt::Format, Debug)]
-pub enum TwiCmd {
-    Write(TwiWrite),
-    Read(TwiAddr, u8),
-    WriteRead(TwiWrite, u8),
-    ReadTemperature(TwiAddr),
+type SerialBuffer = [u8; 64];
+pub type SerialChannel = LocalChannel<u8, SerialBuffer>;
+pub struct SerialSink<'a> {
+    ch: &'a SerialChannel,
 }
 
 #[derive(Debug, defmt::Format)]
@@ -43,7 +34,134 @@ impl From<str::Utf8Error> for ParseError {
     }
 }
 
+impl<'a> SerialSink<'a> {
+    pub fn new(ch: &'a SerialChannel) -> Self {
+        SerialSink { ch }
+    }
+    pub async fn write(
+        &self,
+        s: &str,
+    ) -> core::result::Result<(), futures_intrusive::channel::ChannelSendError<u8>> {
+        for &b in s.as_bytes() {
+            self.ch.send(b).await?;
+        }
+        Ok(())
+    }
+}
+
+macro_rules! writeln_serial {
+    ($dst:expr, $($arg:tt)*) => {
+        if let Err(_) = async {
+            let mut buf = arrayvec::ArrayString::<64>::new();
+            let res = buf.write_fmt(core::format_args!($($arg)*));
+            if let Err(_) = res {
+                error!("formatting error");
+                Err(futures_intrusive::channel::ChannelSendError(b'\0'))
+            } else {
+                info!("ch: {}", buf.as_str());
+                $dst.write(buf.as_str()).await?;
+                $dst.write("\r\n").await
+            }
+        }.await {
+            error!("failed to write to serial");
+        }
+    }
+}
+
 pub type Result<T> = core::result::Result<T, ParseError>;
+
+pub type TwiAddr = twim::Address;
+
+#[derive(defmt::Format, Debug, Default)]
+pub struct TwiData {
+    pub len: u8,
+    pub buf: [u8; 7],
+}
+
+#[derive(defmt::Format, Debug)]
+pub struct TwiWrite {
+    pub addr: TwiAddr,
+    pub data: TwiData,
+}
+
+#[derive(defmt::Format, Debug)]
+pub enum TwiCmd {
+    Write(TwiWrite),
+    Read(TwiAddr, u8),
+    WriteRead(TwiWrite, u8),
+    ReadTemperature(TwiAddr),
+}
+
+impl TwiCmd {
+    pub async fn run(self, twim: &mut twim::Twim, serial: &SerialSink<'_>) {
+        let mut buf = [0u8; 16];
+        match self {
+            TwiCmd::Write(cmd) => {
+                writeln_serial!(
+                    serial,
+                    "write({}, {:?})",
+                    cmd.addr,
+                    &cmd.data.buf[0..cmd.data.len as usize]
+                );
+                let r = twim
+                    .write(cmd.addr, &cmd.data.buf[0..cmd.data.len as usize])
+                    .await;
+                match &r {
+                    Ok(()) => writeln_serial!(serial, "write succeeded"),
+                    Err(e) => writeln_serial!(serial, "write failed: {:?}", e),
+                }
+            }
+            TwiCmd::Read(addr, count) => {
+                writeln_serial!(serial, "read({}, #{})", addr, count);
+                let count = count as usize;
+                if count > buf.len() {
+                    error!("read buffer too small");
+                    return;
+                }
+                let buf = &mut buf[0..count];
+                let r = twim.read(addr, buf).await;
+                match &r {
+                    Ok(()) => writeln_serial!(serial, "read: {:?}", buf),
+                    Err(e) => writeln_serial!(serial, "read failed: {:?}", e),
+                }
+            }
+            TwiCmd::WriteRead(cmd, count) => {
+                writeln_serial!(
+                    serial,
+                    "write({}, {:?}), read(#{})",
+                    cmd.addr,
+                    &cmd.data.buf[0..cmd.data.len as usize],
+                    count
+                );
+                let count = count as usize;
+                if count > buf.len() {
+                    error!("read buffer too small");
+                    return;
+                }
+                let buf = &mut buf[0..count];
+                let r = twim
+                    .write_read(cmd.addr, &cmd.data.buf[0..cmd.data.len as usize], buf)
+                    .await;
+                match &r {
+                    Ok(()) => writeln_serial!(serial, "read: {:?}", buf),
+                    Err(e) => writeln_serial!(serial, "write/read failed: {:?}", e),
+                }
+            }
+            TwiCmd::ReadTemperature(addr) => {
+                writeln_serial!(serial, "reading temp");
+                let mut drv = WeightScaleDrv::new(twim, addr);
+                match drv.read_temperature().await {
+                    Ok(temp) => {
+                        writeln_serial!(serial, "temperature: {}", temp);
+                    }
+                    Err(e) => {
+                        writeln_serial!(serial, "reading temperature failed: {:?}", e);
+                    }
+                }
+            }
+        }
+    }
+}
 
 pub struct TwiCmdParser<'a> {
     line: &'a str,
@@ -149,9 +267,7 @@ impl<'a> TwiCmdParser<'a> {
                         count,
                     )
                 }
-                "t" => {
-                    TwiCmd::ReadTemperature(self.parse_addr()?)
-                }
+                "t" => TwiCmd::ReadTemperature(self.parse_addr()?),
                 _ => return Err(ParseError::new("unknown command", p)),
             })
         } else {

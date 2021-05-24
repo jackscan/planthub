@@ -28,40 +28,15 @@ use embassy_nrf::buffered_uarte::BufferedUarte;
 use embassy_nrf::gpio::NoPin;
 use embassy_nrf::{interrupt, peripherals, uarte, Peripherals};
 
+#[macro_use]
 mod serial_cmds;
-use serial_cmds::TwiCmd;
+use serial_cmds::{SerialChannel, SerialSink, TwiCmd};
 
 mod twim;
 
 mod weight_scale_drv;
-use weight_scale_drv::WeightScaleDrv;
 
 trait AsyncReadWrite: AsyncBufRead + AsyncWrite {}
-
-type SerialBuffer = [u8; 64];
-type SerialChannel = LocalChannel<u8, SerialBuffer>;
-struct SerialSink<'a> {
-    ch: &'a SerialChannel,
-}
-
-macro_rules! writeln_serial {
-    ($dst:expr, $($arg:tt)*) => {
-        if let Err(_) = async {
-            let mut buf = arrayvec::ArrayString::<64>::new();
-            let res = buf.write_fmt(core::format_args!($($arg)*));
-            if let Err(_) = res {
-                error!("formatting error");
-                Err(futures_intrusive::channel::ChannelSendError(b'\0'))
-            } else {
-                info!("ch: {}", buf.as_str());
-                $dst.write(buf.as_str()).await?;
-                $dst.write("\r\n").await
-            }
-        }.await {
-            error!("failed to write to serial");
-        }
-    }
-}
 
 macro_rules! writeln_uart {
     ($dst:expr, $($arg:tt)*) => {
@@ -79,18 +54,6 @@ macro_rules! writeln_uart {
         }.await {
             error!("failed to write to uart");
         }
-    }
-}
-
-impl<'a> SerialSink<'a> {
-    fn new(ch: &'a SerialChannel) -> Self {
-        SerialSink { ch }
-    }
-    async fn write(&self, s: &str) -> Result<(), futures_intrusive::channel::ChannelSendError<u8>> {
-        for &b in s.as_bytes() {
-            self.ch.send(b).await?;
-        }
-        Ok(())
     }
 }
 
@@ -218,84 +181,6 @@ async fn serial_task(
     writeln_uart!(uart, "Serial closed");
 }
 
-async fn twi_transfer(
-    twim: &mut twim::Twim,
-    cmd: TwiCmd,
-    buf: &mut [u8],
-    serial: &SerialSink<'_>,
-) -> Result<(), twim::Error> {
-    match cmd {
-        TwiCmd::Write(cmd) => {
-            writeln_serial!(
-                serial,
-                "write({}, {:?})",
-                cmd.addr,
-                &cmd.data.buf[0..cmd.data.len as usize]
-            );
-            let r = twim
-                .write(cmd.addr, &cmd.data.buf[0..cmd.data.len as usize])
-                .await;
-            match &r {
-                Ok(()) => writeln_serial!(serial, "write succeeded"),
-                Err(e) => writeln_serial!(serial, "write failed: {:?}", e),
-            }
-            r
-        }
-        TwiCmd::Read(addr, count) => {
-            writeln_serial!(serial, "read({}, #{})", addr, count);
-            let count = count as usize;
-            if count > buf.len() {
-                error!("read buffer too small");
-                return Err(twim::Error::Overrun);
-            }
-            let buf = &mut buf[0..count];
-            let r = twim.read(addr, buf).await;
-            match &r {
-                Ok(()) => writeln_serial!(serial, "read: {:?}", buf),
-                Err(e) => writeln_serial!(serial, "read failed: {:?}", e),
-            }
-            r
-        }
-        TwiCmd::WriteRead(cmd, count) => {
-            writeln_serial!(
-                serial,
-                "write({}, {:?}), read(#{})",
-                cmd.addr,
-                &cmd.data.buf[0..cmd.data.len as usize],
-                count
-            );
-            let count = count as usize;
-            if count > buf.len() {
-                error!("read buffer too small");
-                return Err(twim::Error::Overrun);
-            }
-            let buf = &mut buf[0..count];
-            let r = twim
-                .write_read(cmd.addr, &cmd.data.buf[0..cmd.data.len as usize], buf)
-                .await;
-            match &r {
-                Ok(()) => writeln_serial!(serial, "read: {:?}", buf),
-                Err(e) => writeln_serial!(serial, "write/read failed: {:?}", e),
-            }
-            r
-        }
-        TwiCmd::ReadTemperature(addr) => {
-            writeln_serial!(serial, "reading temp");
-            let mut drv = WeightScaleDrv::new(twim, addr);
-            match drv.read_temperature().await {
-                Ok(temp) => {
-                    writeln_serial!(serial, "temperature: {}", temp);
-                    Ok(())
-                }
-                Err(e) => {
-                    writeln_serial!(serial, "reading temperature failed: {:?}", e);
-                    Err(e)
-                }
-            }
-        }
-    }
-}
-
 #[embassy::task]
 async fn twi_task(
     mut twim: twim::Twim,
@@ -305,26 +190,21 @@ async fn twi_task(
     let serial = SerialSink::new(serial);
     loop {
         let cmd = cmd_sig.wait().await;
-        let mut buf = [0u8; 16];
 
         let (twim, stopper) = twim.borrow_stoppable();
+        let transfer = cmd.run(twim, &serial);
+        pin_mut!(transfer);
+        let timer = Timer::after(Duration::from_millis(10));
 
-        {
-            let transfer = twi_transfer(twim, cmd, &mut buf, &serial);
-            pin_mut!(transfer);
-            let timer = Timer::after(Duration::from_millis(10));
-
-            let _ = match futures::future::select(transfer, timer).await {
-                Either::Left((r, _)) => r,
-                Either::Right((_, transfer)) => {
-                    stopper.stop();
-                    info!("stopping");
-                    // need to await the stopped transfer
-                    transfer.await
-                }
-            };
-        }
-
+        let _ = match futures::future::select(transfer, timer).await {
+            Either::Left((r, _)) => r,
+            Either::Right((_, transfer)) => {
+                stopper.stop();
+                info!("stopping");
+                // need to await the stopped transfer
+                transfer.await
+            }
+        };
     }
 }
 
