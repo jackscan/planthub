@@ -38,8 +38,7 @@ pub struct Twim {
 }
 
 pub struct StopSwitch<'a> {
-    regs: &'static pac::twim0::RegisterBlock,
-    _pd: PhantomData<&'a ()>,
+    regs: &'a pac::twim0::RegisterBlock,
 }
 
 impl Twim {
@@ -126,14 +125,8 @@ impl Twim {
     }
 
     pub fn borrow_stoppable<'a>(&'a mut self) -> (&'a mut Self, StopSwitch<'a>) {
-        let r = self.regs;
-        (
-            self,
-            StopSwitch {
-                regs: r,
-                _pd: PhantomData,
-            },
-        )
+        let regs = self.regs;
+        (self, StopSwitch { regs })
     }
 
     pub fn read<'a>(&'a mut self, address: Address, buffer: &'a mut [u8]) -> Transfer<'a> {
