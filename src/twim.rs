@@ -1,6 +1,7 @@
 use core::future::Future;
 use core::marker::PhantomData;
 use core::task::{Context, Poll};
+use core::sync::atomic::{compiler_fence, Ordering};
 
 use defmt::trace;
 use embassy::interrupt::{Interrupt, InterruptExt};
@@ -199,6 +200,8 @@ impl<'a> Transfer<'a> {
                 let r = self.regs;
                 // Enable shortcut between event LASTRX and task STOP.
                 r.shorts.write(|w| w.lastrx_stop().enabled());
+                // Fence for dma transfer.
+                compiler_fence(Ordering::Release);
                 // Start receive.
                 r.tasks_startrx.write(|w| unsafe { w.bits(1) });
 
@@ -213,6 +216,8 @@ impl<'a> Transfer<'a> {
                 let r = self.regs;
                 // Enable shortcut between event LASTTX and task STOP.
                 r.shorts.write(|w| w.lasttx_stop().enabled());
+                // Fence for dma transfer.
+                compiler_fence(Ordering::Release);
                 // Start transmission.
                 r.tasks_starttx.write(|w| unsafe { w.bits(1) });
 
@@ -232,6 +237,8 @@ impl<'a> Transfer<'a> {
                 // and event LASTRX and task STOP.
                 r.shorts
                     .write(|w| w.lasttx_startrx().enabled().lastrx_stop().enabled());
+                // Fence for dma transfer.
+                compiler_fence(Ordering::Release);
                 // Start transmission.
                 r.tasks_starttx.write(|w| unsafe { w.bits(1) });
 
@@ -294,6 +301,9 @@ impl<'a> Transfer<'a> {
             trace!("transfer pending");
             return Poll::Pending;
         }
+
+        // Fence for end of dma transfer.
+        compiler_fence(Ordering::Acquire);
 
         Poll::Ready(if r.events_error.read().bits() == 0 {
             let txn = r.txd.amount.read().bits() as usize;
