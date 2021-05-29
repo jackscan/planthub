@@ -91,6 +91,10 @@ pub enum TwiCmd {
     Read(TwiAddr, u8),
     WriteRead(TwiWrite, u8),
     ReadTemperature(TwiAddr),
+    SetValve(TwiAddr, bool),
+    SetWatchdog(TwiAddr, bool),
+    MeasureWeight(TwiAddr, u16),
+    Sleep(TwiAddr),
 }
 
 impl TwiCmd {
@@ -100,10 +104,25 @@ impl TwiCmd {
             TwiCmd::Read(_, _) => 1,
             TwiCmd::WriteRead(_, _) => 1,
             TwiCmd::ReadTemperature(_) => 3,
+            TwiCmd::SetValve(_, _) => 1,
+            TwiCmd::SetWatchdog(_, _) => 1,
+            TwiCmd::MeasureWeight(_, ms) => (ms + 2) as u64,
+            TwiCmd::Sleep(_) => 1,
         })
     }
 
     pub async fn run(self, twim: &mut twim::Twim, serial: &SerialSink<'_>) {
+        match &self.exec(twim, serial).await {
+            Ok(()) => writeln_serial!(serial, "success"),
+            Err(e) => writeln_serial!(serial, "failed: {:?}", e),
+        }
+    }
+
+    async fn exec(
+        &self,
+        twim: &mut twim::Twim,
+        serial: &SerialSink<'_>,
+    ) -> core::result::Result<(), twim::Error> {
         let mut buf = [0u8; 16];
         match self {
             TwiCmd::Write(cmd) => {
@@ -113,27 +132,19 @@ impl TwiCmd {
                     cmd.addr,
                     &cmd.data.buf[0..cmd.data.len as usize]
                 );
-                let r = twim
-                    .write(cmd.addr, &cmd.data.buf[0..cmd.data.len as usize])
-                    .await;
-                match &r {
-                    Ok(()) => writeln_serial!(serial, "write succeeded"),
-                    Err(e) => writeln_serial!(serial, "write failed: {:?}", e),
-                }
+                twim.write(cmd.addr, &cmd.data.buf[0..cmd.data.len as usize])
+                    .await?;
             }
-            TwiCmd::Read(addr, count) => {
+            &TwiCmd::Read(addr, count) => {
                 writeln_serial!(serial, "read({}, #{})", addr, count);
                 let count = count as usize;
                 if count > buf.len() {
                     error!("read buffer too small");
-                    return;
+                    return Err(twim::Error::Overrun);
                 }
                 let buf = &mut buf[0..count];
-                let r = twim.read(addr, buf).await;
-                match &r {
-                    Ok(()) => writeln_serial!(serial, "read: {:?}", buf),
-                    Err(e) => writeln_serial!(serial, "read failed: {:?}", e),
-                }
+                twim.read(addr, buf).await?;
+                writeln_serial!(serial, "read: {:?}", buf);
             }
             TwiCmd::WriteRead(cmd, count) => {
                 writeln_serial!(
@@ -143,33 +154,50 @@ impl TwiCmd {
                     &cmd.data.buf[0..cmd.data.len as usize],
                     count
                 );
-                let count = count as usize;
+                let count = *count as usize;
                 if count > buf.len() {
                     error!("read buffer too small");
-                    return;
+                    return Err(twim::Error::Overrun);
                 }
                 let buf = &mut buf[0..count];
-                let r = twim
-                    .write_read(cmd.addr, &cmd.data.buf[0..cmd.data.len as usize], buf)
-                    .await;
-                match &r {
-                    Ok(()) => writeln_serial!(serial, "read: {:?}", buf),
-                    Err(e) => writeln_serial!(serial, "write/read failed: {:?}", e),
-                }
+                twim.write_read(cmd.addr, &cmd.data.buf[0..cmd.data.len as usize], buf)
+                    .await?;
+                writeln_serial!(serial, "read: {:?}", buf);
             }
-            TwiCmd::ReadTemperature(addr) => {
+            &TwiCmd::SetValve(addr, open) => {
+                writeln_serial!(serial, "{} valve", if open { "opening" } else { "closing" });
+                let mut drv = WeightScaleDrv::new(twim, addr);
+                drv.set_valve(open).await?;
+            }
+            &TwiCmd::SetWatchdog(addr, enabled) => {
+                writeln_serial!(
+                    serial,
+                    "{} watchdog",
+                    if enabled { "enabling" } else { "disabling" }
+                );
+                let mut drv = WeightScaleDrv::new(twim, addr);
+                drv.set_watchdog(enabled).await?;
+            }
+            &TwiCmd::ReadTemperature(addr) => {
                 writeln_serial!(serial, "reading temp");
                 let mut drv = WeightScaleDrv::new(twim, addr);
-                match drv.read_temperature().await {
-                    Ok(temp) => {
-                        writeln_serial!(serial, "temperature: {}", temp);
-                    }
-                    Err(e) => {
-                        writeln_serial!(serial, "reading temperature failed: {:?}", e);
-                    }
-                }
+                let temp = drv.read_temperature().await?;
+                writeln_serial!(serial, "temperature: {}", temp);
+            }
+            &TwiCmd::MeasureWeight(addr, ms) => {
+                writeln_serial!(serial, "measuring weight for {} ms", ms);
+                let mut drv = WeightScaleDrv::new(twim, addr);
+                let w = drv.measure_weight(Duration::from_millis(ms as u64)).await?;
+                writeln_serial!(serial, "weight: {}", w);
+                drv.sleep().await?;
+            }
+            &TwiCmd::Sleep(addr) => {
+                writeln_serial!(serial, "sleep");
+                let mut drv = WeightScaleDrv::new(twim, addr);
+                drv.sleep().await?;
             }
         }
+        Ok(())
     }
 }
 
@@ -236,6 +264,26 @@ impl<'a> TwiCmdParser<'a> {
         })
     }
 
+    fn parse_u16(&mut self) -> Result<Option<u16>> {
+        Ok(match self.next_word() {
+            Some((s, p)) => Some(
+                if let Some(s) = s.strip_prefix("0x") {
+                    u16::from_str_radix(s, 16)
+                } else if let Some(s) = s.strip_prefix("0") {
+                    if s.len() > 0 {
+                        u16::from_str_radix(s, 8)
+                    } else {
+                        Ok(0)
+                    }
+                } else {
+                    u16::from_str_radix(s, 10)
+                }
+                .map_err(|_| ParseError::new("expected 16bit unsigned", p))?,
+            ),
+            None => None,
+        })
+    }
+
     fn parse_addr(&mut self) -> Result<TwiAddr> {
         self.parse_byte()?
             .ok_or(ParseError::new("expected address", self.pos))
@@ -244,6 +292,17 @@ impl<'a> TwiCmdParser<'a> {
     fn parse_count(&mut self) -> Result<u8> {
         self.parse_byte()?
             .ok_or(ParseError::new("expected count", self.pos))
+    }
+
+    fn parse_bool(&mut self) -> Result<bool> {
+        match self
+            .parse_byte()?
+            .ok_or(ParseError::new("expected boolean", self.pos))?
+        {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(ParseError::new("expected 0 or 1", self.pos)),
+        }
     }
 
     fn parse_data(&mut self) -> Result<TwiData> {
@@ -282,6 +341,24 @@ impl<'a> TwiCmdParser<'a> {
                     )
                 }
                 "t" => TwiCmd::ReadTemperature(self.parse_addr()?),
+                "v" => {
+                    let addr = self.parse_addr()?;
+                    let open = self.parse_bool()?;
+                    TwiCmd::SetValve(addr, open)
+                }
+                "wd" => {
+                    let addr = self.parse_addr()?;
+                    let enabled = self.parse_bool()?;
+                    TwiCmd::SetWatchdog(addr, enabled)
+                }
+                "m" => {
+                    let addr = self.parse_addr()?;
+                    let ms = self
+                        .parse_u16()?
+                        .ok_or(ParseError::new("expected delay", self.pos))?;
+                    TwiCmd::MeasureWeight(addr, ms)
+                }
+                "s" => TwiCmd::Sleep(self.parse_addr()?),
                 _ => return Err(ParseError::new("unknown command", p)),
             })
         } else {
