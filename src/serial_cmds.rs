@@ -2,6 +2,7 @@ use core::fmt::Write;
 use core::str;
 
 use defmt::{error, info};
+use embassy::time::Duration;
 use futures_intrusive::channel::LocalChannel;
 
 use crate::twim;
@@ -93,6 +94,15 @@ pub enum TwiCmd {
 }
 
 impl TwiCmd {
+    pub fn timeout(&self) -> Duration {
+        Duration::from_millis(match self {
+            TwiCmd::Write(_) => 1,
+            TwiCmd::Read(_, _) => 1,
+            TwiCmd::WriteRead(_, _) => 1,
+            TwiCmd::ReadTemperature(_) => 3,
+        })
+    }
+
     pub async fn run(self, twim: &mut twim::Twim, serial: &SerialSink<'_>) {
         let mut buf = [0u8; 16];
         match self {

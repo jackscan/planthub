@@ -192,15 +192,18 @@ async fn twi_task(
         let cmd = cmd_sig.wait().await;
 
         let (twim, stopper) = twim.borrow_stoppable();
+        let timeout = cmd.timeout();
+        info!("timeout: {}", timeout);
         let transfer = cmd.run(twim, &serial);
         pin_mut!(transfer);
-        let timer = Timer::after(Duration::from_millis(10));
+        let timer = Timer::after(timeout);
 
         let _ = match futures::future::select(transfer, timer).await {
             Either::Left((r, _)) => r,
             Either::Right((_, transfer)) => {
                 stopper.stop();
                 info!("stopping");
+                writeln_serial!(serial, "timeout after {} ms", timeout.as_millis());
                 // need to await the stopped transfer
                 transfer.await
             }
