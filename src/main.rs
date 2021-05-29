@@ -38,22 +38,31 @@ mod weight_scale_drv;
 
 trait AsyncReadWrite: AsyncBufRead + AsyncWrite {}
 
+async fn writeln_uart_fmt(
+    mut uart: Pin<&mut dyn AsyncReadWrite>,
+    args: core::fmt::Arguments<'_>,
+) {
+    if let Err(_) = async {
+        let mut buf = arrayvec::ArrayString::<64>::new();
+        let res = buf.write_fmt(args);
+        if let Err(_) = res {
+            error!("formatting error");
+            Err(io::Error::InvalidData)
+        } else {
+            info!("uart: {}", buf.as_str());
+            uart.write_all(buf.as_bytes()).await?;
+            uart.write_all(b"\r\n").await
+        }
+    }
+    .await
+    {
+        error!("failed to write to uart");
+    }
+}
+
 macro_rules! writeln_uart {
     ($dst:expr, $($arg:tt)*) => {
-        if let Err(_) = async {
-            let mut buf = arrayvec::ArrayString::<64>::new();
-            let res = buf.write_fmt(core::format_args!($($arg)*));
-            if let Err(_) = res {
-                error!("formatting error");
-                Err(io::Error::InvalidData)
-            } else {
-                info!("uart: {}", buf.as_str());
-                $dst.write_all(buf.as_bytes()).await?;
-                $dst.write_all(b"\r\n").await
-            }
-        }.await {
-            error!("failed to write to uart");
-        }
+        writeln_uart_fmt($dst, core::format_args!($($arg)*)).await;
     }
 }
 
@@ -169,10 +178,10 @@ async fn serial_task(
                 cmd_sig.signal(cmd);
             }
             SerialTask::SerialInput(Err(e)) => {
-                writeln_uart!(uart, "parse error: {:?}", e);
+                writeln_uart!(uart.as_mut(), "parse error: {:?}", e);
             }
             SerialTask::InputTooLong => {
-                writeln_uart!(uart, "input line exceeds limit");
+                writeln_uart!(uart.as_mut(), "input line exceeds limit");
             }
             SerialTask::ChannelClosed => break,
         }

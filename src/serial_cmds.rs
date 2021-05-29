@@ -48,24 +48,28 @@ impl<'a> SerialSink<'a> {
         }
         Ok(())
     }
-}
 
-macro_rules! writeln_serial {
-    ($dst:expr, $($arg:tt)*) => {
+    pub async fn writeln_fmt(&self, args: core::fmt::Arguments<'_>) {
         if let Err(_) = async {
             let mut buf = arrayvec::ArrayString::<64>::new();
-            let res = buf.write_fmt(core::format_args!($($arg)*));
+            let res = buf.write_fmt(args);
             if let Err(_) = res {
                 error!("formatting error");
                 Err(futures_intrusive::channel::ChannelSendError(b'\0'))
             } else {
                 info!("ch: {}", buf.as_str());
-                $dst.write(buf.as_str()).await?;
-                $dst.write("\r\n").await
+                self.write(buf.as_str()).await?;
+                self.write("\r\n").await
             }
         }.await {
             error!("failed to write to serial");
         }
+    }
+}
+
+macro_rules! writeln_serial {
+    ($dst:expr, $($arg:tt)*) => {
+            $dst.writeln_fmt(core::format_args!($($arg)*)).await;
     }
 }
 
