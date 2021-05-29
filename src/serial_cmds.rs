@@ -222,7 +222,11 @@ impl<'a> TwiCmdParser<'a> {
                 if let Some(s) = s.strip_prefix("0x") {
                     u8::from_str_radix(s, 16)
                 } else if let Some(s) = s.strip_prefix("0") {
-                    u8::from_str_radix(s, 8)
+                    if s.len() > 0 {
+                        u8::from_str_radix(s, 8)
+                    } else {
+                        Ok(0)
+                    }
                 } else {
                     u8::from_str_radix(s, 10)
                 }
