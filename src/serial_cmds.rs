@@ -137,17 +137,14 @@ impl TwiCmd {
                     cmd.addr,
                     &cmd.data.buf[0..cmd.data.len as usize]
                 );
-                let mut transfer = twim.transfer()?;
-                transfer
-                    .write_buf(cmd.data.len as usize)?
-                    .copy_from_slice(&cmd.data.buf[0..cmd.data.len as usize]);
-                transfer.start(cmd.addr).await?;
+                twim.transfer()?
+                    .write(&cmd.data.buf[0..cmd.data.len as usize])?
+                    .start(cmd.addr)
+                    .await?;
             }
             &TwiCmd::Read(addr, count) => {
                 writeln_serial!(serial, "read({}, #{})", addr, count);
-                let mut transfer = twim.transfer()?;
-                transfer.read_len(count as usize)?;
-                let buf = transfer.start(addr).await?;
+                let buf = twim.transfer()?.read(count as usize)?.start(addr).await?;
                 writeln_serial!(serial, "read: {:?}", buf);
             }
             TwiCmd::WriteRead(cmd, count) => {
@@ -158,12 +155,12 @@ impl TwiCmd {
                     &cmd.data.buf[0..cmd.data.len as usize],
                     count
                 );
-                let mut transfer = twim.transfer()?;
-                transfer
-                    .write_buf(cmd.data.len as usize)?
-                    .copy_from_slice(&cmd.data.buf[0..cmd.data.len as usize]);
-                transfer.read_len(*count as usize)?;
-                let buf = transfer.start(cmd.addr).await?;
+                let buf = twim
+                    .transfer()?
+                    .write(&cmd.data.buf[0..cmd.data.len as usize])?
+                    .read(*count as usize)?
+                    .start(cmd.addr)
+                    .await?;
                 writeln_serial!(serial, "read: {:?}", buf);
             }
             &TwiCmd::SetValve(addr, open) => {
