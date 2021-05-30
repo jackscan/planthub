@@ -104,14 +104,14 @@ pub enum TwiCmd {
 impl TwiCmd {
     pub fn timeout(&self) -> Duration {
         Duration::from_millis(match self {
-            TwiCmd::Write(_) => 1,
-            TwiCmd::Read(_, _) => 1,
-            TwiCmd::WriteRead(_, _) => 1,
-            TwiCmd::ReadTemperature(_) => 3,
-            TwiCmd::SetValve(_, _) => 1,
-            TwiCmd::SetWatchdog(_, _) => 1,
-            TwiCmd::MeasureWeight(_, ms) => (ms + 2) as u64,
-            TwiCmd::Sleep(_) => 1,
+            TwiCmd::Write(_) => 10,
+            TwiCmd::Read(_, _) => 10,
+            TwiCmd::WriteRead(_, _) => 20,
+            TwiCmd::ReadTemperature(_) => 20,
+            TwiCmd::SetValve(_, _) => 10,
+            TwiCmd::SetWatchdog(_, _) => 10,
+            TwiCmd::MeasureWeight(_, ms) => (ms + 20) as u64,
+            TwiCmd::Sleep(_) => 10,
         })
     }
 
