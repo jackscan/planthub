@@ -1,7 +1,6 @@
 use core::future::Future;
-use core::marker::PhantomData;
-use core::task::{Context, Poll};
 use core::sync::atomic::{compiler_fence, Ordering};
+use core::task::{Context, Poll};
 
 use defmt::trace;
 use embassy::interrupt::{Interrupt, InterruptExt};
@@ -15,8 +14,6 @@ pub use hal::twim::Frequency;
 use nrf52832_hal as hal;
 
 const EASY_DMA_SIZE: usize = (1 << 8) - 1;
-const SRAM_LOWER: usize = 0x2000_0000;
-const SRAM_UPPER: usize = 0x3000_0000;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, defmt::Format)]
 pub enum Error {
@@ -26,7 +23,6 @@ pub enum Error {
     RxBufferZeroLength,
     Transmit,
     Receive,
-    DMABufferNotInDataMemory,
     AddressNack,
     DataNack,
     Overrun,
@@ -36,6 +32,9 @@ pub enum Error {
 pub struct Twim {
     regs: &'static pac::twim0::RegisterBlock,
     state: &'static sealed::State,
+    buf: &'static mut [u8],
+    txlen: usize,
+    rxlen: usize,
 }
 
 pub struct StopSwitch<'a> {
@@ -49,6 +48,7 @@ impl Twim {
         scl: impl Unborrow<Target = impl gpio::Pin>,
         sda: impl Unborrow<Target = impl gpio::Pin>,
         freq: Frequency,
+        buf: &'static mut [u8],
     ) -> Self {
         unborrow!(irq, scl, sda);
 
@@ -122,6 +122,9 @@ impl Twim {
         Self {
             regs: T::regs(),
             state: T::state(),
+            buf,
+            txlen: 0,
+            rxlen: 0,
         }
     }
 
@@ -130,120 +133,14 @@ impl Twim {
         (self, StopSwitch { regs })
     }
 
-    pub fn read<'a>(&'a mut self, address: Address, buffer: &'a mut [u8]) -> Transfer<'a> {
-        Transfer::new(self, address, TransferSetup::Read(buffer))
-    }
-
-    pub fn write<'a>(&'a mut self, address: Address, buffer: &'a [u8]) -> Transfer<'a> {
-        Transfer::new(self, address, TransferSetup::Write(buffer))
-    }
-
-    pub fn write_read<'a>(
-        &'a mut self,
-        address: Address,
-        send_buffer: &'a [u8],
-        recv_buffer: &'a mut [u8],
-    ) -> Transfer<'a> {
-        Transfer::new(
-            self,
-            address,
-            TransferSetup::WriteRead(send_buffer, recv_buffer),
-        )
-    }
-}
-
-impl<'a> StopSwitch<'a> {
-    pub fn stop(&self) {
-        self.regs.tasks_stop.write(|w| unsafe { w.bits(1) });
-    }
-}
-
-#[derive(defmt::Format)]
-enum TransferSetup<'a> {
-    Read(&'a mut [u8]),
-    Write(&'a [u8]),
-    WriteRead(&'a [u8], &'a mut [u8]),
-}
-
-enum TransferState<'a> {
-    Empty,
-    Setup(Address, TransferSetup<'a>),
-    Running(DropBomb, usize, usize),
-}
-
-pub struct Transfer<'a> {
-    regs: &'static pac::twim0::RegisterBlock,
-    state: &'static sealed::State,
-    run_state: TransferState<'a>,
-    _pd: PhantomData<&'a mut ()>,
-}
-
-impl<'a> Transfer<'a> {
-    fn new(twim: &'a mut Twim, addr: Address, setup: TransferSetup<'a>) -> Self {
-        trace!("new transfer to {:x}", addr);
-        Self {
-            regs: twim.regs,
-            state: twim.state,
-            run_state: TransferState::Setup(addr, setup),
-            _pd: PhantomData,
-        }
-    }
-
-    fn start(&mut self, addr: Address, setup: TransferSetup<'a>) -> Result<(usize, usize), Error> {
-        match setup {
-            TransferSetup::Read(recv_buffer) => {
-                check_rx_buffer(recv_buffer)?;
-                self.init_transfer(addr)?;
-                let rxb = recv_buffer.len();
-                unsafe { self.setup_rx(recv_buffer) };
-
-                let r = self.regs;
-                // Enable shortcut between event LASTRX and task STOP.
-                r.shorts.write(|w| w.lastrx_stop().enabled());
-                // Fence for dma transfer.
-                compiler_fence(Ordering::Release);
-                // Start receive.
-                r.tasks_startrx.write(|w| unsafe { w.bits(1) });
-
-                Ok((0, rxb))
-            }
-            TransferSetup::Write(send_buffer) => {
-                check_tx_buffer(send_buffer)?;
-                self.init_transfer(addr)?;
-                let txb = send_buffer.len();
-                unsafe { self.setup_tx(send_buffer) };
-
-                let r = self.regs;
-                // Enable shortcut between event LASTTX and task STOP.
-                r.shorts.write(|w| w.lasttx_stop().enabled());
-                // Fence for dma transfer.
-                compiler_fence(Ordering::Release);
-                // Start transmission.
-                r.tasks_starttx.write(|w| unsafe { w.bits(1) });
-
-                Ok((txb, 0))
-            }
-            TransferSetup::WriteRead(send_buffer, recv_buffer) => {
-                check_tx_buffer(send_buffer)?;
-                check_rx_buffer(recv_buffer)?;
-                self.init_transfer(addr)?;
-                let txb = send_buffer.len();
-                let rxb = recv_buffer.len();
-                unsafe { self.setup_tx(send_buffer) };
-                unsafe { self.setup_rx(recv_buffer) };
-
-                let r = self.regs;
-                // Enable shortcuts between event LASTTX and STARTRX,
-                // and event LASTRX and task STOP.
-                r.shorts
-                    .write(|w| w.lasttx_startrx().enabled().lastrx_stop().enabled());
-                // Fence for dma transfer.
-                compiler_fence(Ordering::Release);
-                // Start transmission.
-                r.tasks_starttx.write(|w| unsafe { w.bits(1) });
-
-                Ok((txb, rxb))
-            }
+    pub fn transfer<'a>(&'a mut self) -> Result<TransferSetup<'a>, Error> {
+        // While interrupt for event STOPPED is enabled another transaction is in progress.
+        if self.regs.inten.read().stopped().is_enabled() {
+            Err(Error::Busy)
+        } else {
+            self.txlen = 0;
+            self.rxlen = 0;
+            Ok(TransferSetup { twim: self })
         }
     }
 
@@ -269,27 +166,75 @@ impl<'a> Transfer<'a> {
     }
 
     /// Safety: We must quarantee that buffer is not read before TWIM is stopped.
-    unsafe fn setup_rx(&mut self, buffer: &'a mut [u8]) {
+    fn setup_rx(&mut self) {
+        trace!("setup rx: {}", self.rxlen);
         let r = self.regs;
         r.events_lastrx.reset();
         r.rxd
             .ptr
-            .write(|w| unsafe { w.ptr().bits(buffer.as_mut_ptr() as _) });
+            .write(|w| unsafe { w.ptr().bits(self.buf.as_mut_ptr() as _) });
         r.rxd
             .maxcnt
-            .write(|w| unsafe { w.maxcnt().bits(buffer.len() as _) });
+            .write(|w| unsafe { w.maxcnt().bits(self.rxlen as _) });
     }
 
     /// Safety: We must quarantee that buffer is not written before TWIM is stopped.
-    unsafe fn setup_tx(&mut self, buffer: &'a [u8]) {
+    fn setup_tx(&mut self) {
+        trace!("setup tx: {}", self.txlen);
         let r = self.regs;
         r.events_lasttx.reset();
         r.txd
             .ptr
-            .write(|w| unsafe { w.ptr().bits(buffer.as_ptr() as _) });
+            .write(|w| unsafe { w.ptr().bits(self.buf.as_ptr() as _) });
         r.txd
             .maxcnt
-            .write(|w| unsafe { w.maxcnt().bits(buffer.len() as _) });
+            .write(|w| unsafe { w.maxcnt().bits(self.txlen as _) });
+    }
+
+    fn start(&mut self, addr: Address) -> Result<(), Error> {
+        if self.txlen == 0 && self.rxlen == 0 {
+            return Err(Error::RxBufferZeroLength);
+        }
+
+        let r = self.regs;
+        self.init_transfer(addr)?;
+
+        if self.txlen > 0 {
+            self.setup_tx();
+        }
+
+        if self.rxlen > 0 {
+            self.setup_rx();
+        }
+
+        r.shorts.write(|w| match (self.txlen, self.rxlen) {
+            (0, _) => {
+                // Enable shortcut between event LASTRX and task STOP.
+                w.lastrx_stop().enabled()
+            }
+            (_, 0) => {
+                // Enable shortcut between event LASTTX and task STOP.
+                w.lasttx_stop().enabled()
+            }
+            (_, _) => {
+                // Enable shortcuts between event LASTTX and STARTRX,
+                // and event LASTRX and task STOP.
+                w.lasttx_startrx().enabled().lastrx_stop().enabled()
+            }
+        });
+
+        // Fence for dma transfer.
+        compiler_fence(Ordering::Release);
+
+        if self.txlen > 0 {
+            // Start transmission.
+            r.tasks_starttx.write(|w| unsafe { w.bits(1) });
+        } else {
+            // Start receive.
+            r.tasks_startrx.write(|w| unsafe { w.bits(1) });
+        }
+
+        Ok(())
     }
 
     fn poll_end(&self, cx: &mut Context<'_>) -> Poll<Result<(usize, usize), Error>> {
@@ -323,87 +268,112 @@ impl<'a> Transfer<'a> {
     }
 }
 
-impl<'a> Future for Transfer<'a> {
-    type Output = Result<(), Error>;
+impl<'a> StopSwitch<'a> {
+    pub fn stop(&self) {
+        self.regs.tasks_stop.write(|w| unsafe { w.bits(1) });
+    }
+}
 
-    fn poll(
-        self: core::pin::Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<<Self as futures::Future>::Output> {
-        let this = self.get_mut();
+pub struct TransferSetup<'a> {
+    twim: &'a mut Twim,
+}
 
-        this.run_state = match core::mem::replace(&mut this.run_state, TransferState::Empty) {
-            TransferState::Setup(addr, setup) => {
-                trace!("transfer setup {}", setup);
-                let (txb, rxb) = this.start(addr, setup)?;
-                TransferState::Running(DropBomb::new(), txb, rxb)
-            }
-            TransferState::Empty => panic!("Polling empty transfer"),
-            state => {
-                trace!("transfer poll");
-                state
-            }
-        };
-
-        if let Poll::Ready(res) = this.poll_end(cx) {
-            match core::mem::replace(&mut this.run_state, TransferState::Empty) {
-                TransferState::Running(bomb, txb, rxb) => {
-                    bomb.defuse();
-                    match res {
-                        Ok((txn, _)) if txb != 0 && txn != txb => {
-                            trace!("tx len:{} send:{}", txb, txn);
-                            Poll::Ready(Err(Error::Transmit))
-                        }
-                        Ok((_, rxn)) if rxb != 0 && rxn != rxb => {
-                            trace!("rx len:{} recv:{}", rxb, rxn);
-                            Poll::Ready(Err(Error::Receive))
-                        }
-                        Ok(_) => Poll::Ready(Ok(())),
-                        Err(e) => Poll::Ready(Err(e)),
-                    }
-                }
-                _ => unreachable!(),
-            }
+impl<'a> TransferSetup<'a> {
+    #[must_use]
+    pub fn write_buf(&mut self, n: usize) -> Result<&mut [u8], Error> {
+        let buf = &mut self.twim.buf;
+        if n > buf.len() {
+            Err(Error::Overrun)
+        } else if n == 0 {
+            Err(Error::TxBufferZeroLength)
+        } else if n > EASY_DMA_SIZE {
+            Err(Error::TxBufferTooLong)
         } else {
-            Poll::Pending
+            self.twim.txlen = n;
+            Ok(&mut buf[..n])
+        }
+    }
+
+    pub fn read_len(&mut self, n: usize) -> Result<(), Error> {
+        let buf = &mut self.twim.buf;
+        if n > buf.len() {
+            Err(Error::Overrun)
+        } else if n == 0 {
+            Err(Error::TxBufferZeroLength)
+        } else if n > EASY_DMA_SIZE {
+            Err(Error::RxBufferTooLong)
+        } else {
+            self.twim.rxlen = n;
+            Ok(())
+        }
+    }
+
+    #[must_use]
+    pub fn start(self, addr: Address) -> Transfer<'a> {
+        Transfer::new(self.twim, addr)
+    }
+}
+
+enum TransferState<'a> {
+    Empty,
+    Setup(Address, &'a mut Twim),
+    Running(DropBomb, &'a mut Twim),
+}
+
+pub struct Transfer<'a> {
+    run_state: TransferState<'a>,
+}
+
+impl<'a> Transfer<'a> {
+    fn new(twim: &'a mut Twim, addr: Address) -> Self {
+        trace!("new transfer to {:x}", addr);
+        Self {
+            run_state: TransferState::Setup(addr, twim),
         }
     }
 }
 
-fn slice_in_ram(slice: &[u8]) -> bool {
-    let ptr = slice.as_ptr() as usize;
-    ptr >= SRAM_LOWER && (ptr + slice.len()) < SRAM_UPPER
-}
+impl<'a> Future for Transfer<'a> {
+    type Output = Result<&'a [u8], Error>;
 
-fn check_rx_buffer(buffer: &[u8]) -> Result<(), Error> {
-    // check if buffer is in RAM
-    if !slice_in_ram(buffer) {
-        return Err(Error::DMABufferNotInDataMemory);
-    }
-
-    // check buffer size
-    if buffer.len() == 0 {
-        Err(Error::RxBufferZeroLength)
-    } else if buffer.len() > EASY_DMA_SIZE {
-        Err(Error::RxBufferTooLong)
-    } else {
-        Ok(())
-    }
-}
-
-fn check_tx_buffer(buffer: &[u8]) -> Result<(), Error> {
-    // check if buffer is in RAM
-    if !slice_in_ram(buffer) {
-        return Err(Error::DMABufferNotInDataMemory);
-    }
-
-    // check buffer size
-    if buffer.len() == 0 {
-        Err(Error::TxBufferZeroLength)
-    } else if buffer.len() > EASY_DMA_SIZE {
-        Err(Error::TxBufferTooLong)
-    } else {
-        Ok(())
+    fn poll(
+        mut self: core::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<<Self as futures::Future>::Output> {
+        loop {
+            match core::mem::replace(&mut self.as_mut().run_state, TransferState::Empty) {
+                TransferState::Setup(addr, twim) => {
+                    twim.start(addr)?;
+                    self.as_mut().run_state = TransferState::Running(DropBomb::new(), twim)
+                }
+                TransferState::Running(bomb, twim) => {
+                    break if let Poll::Ready(res) = twim.poll_end(cx) {
+                        bomb.defuse();
+                        let (txb, rxb) = (twim.txlen, twim.rxlen);
+                        match res {
+                            Ok((txn, _)) if txb != 0 && txn != txb => {
+                                trace!("tx len:{} send:{}", txb, txn);
+                                Poll::Ready(Err(Error::Transmit))
+                            }
+                            Ok((_, rxn)) if rxb != 0 && rxn != rxb => {
+                                trace!("rx len:{} recv:{}", rxb, rxn);
+                                Poll::Ready(Err(Error::Receive))
+                            }
+                            Ok((_, rxn)) => {
+                                // let r = self.as_ref();
+                                let r = &twim.buf[..rxn];
+                                Poll::Ready(Ok(r))
+                            }
+                            Err(e) => Poll::Ready(Err(e)),
+                        }
+                    } else {
+                        self.as_mut().run_state = TransferState::Running(bomb, twim);
+                        Poll::Pending
+                    };
+                }
+                TransferState::Empty => panic!("Polling empty transfer"),
+            }
+        }
     }
 }
 

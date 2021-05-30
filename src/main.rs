@@ -17,7 +17,7 @@ use defmt_rtt as _;
 use embassy::executor::Spawner;
 use embassy::io;
 use embassy::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt};
-use embassy::time::{Duration, Timer};
+use embassy::time::Timer;
 use embassy::util::{Forever, Signal};
 use futures::{pin_mut, Stream};
 use futures_intrusive::channel::LocalChannel;
@@ -38,10 +38,7 @@ mod weight_scale_drv;
 
 trait AsyncReadWrite: AsyncBufRead + AsyncWrite {}
 
-async fn writeln_uart_fmt(
-    mut uart: Pin<&mut dyn AsyncReadWrite>,
-    args: core::fmt::Arguments<'_>,
-) {
+async fn writeln_uart_fmt(mut uart: Pin<&mut dyn AsyncReadWrite>, args: core::fmt::Arguments<'_>) {
     if let Err(_) = async {
         let mut buf = arrayvec::ArrayString::<64>::new();
         let res = buf.write_fmt(args);
@@ -254,12 +251,14 @@ async fn main(spawner: Spawner, p: Peripherals) {
 
     let uart = Pin::static_mut(uart);
 
+    static mut TWIM_BUF: [u8; 32] = [0u8; 32];
     let twim = twim::Twim::new(
         p.TWISPI0,
         interrupt::take!(SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0),
         p.P0_26,
         p.P0_25,
         twim::Frequency::K100,
+        unsafe { &mut TWIM_BUF },
     );
 
     let serial_ch = SERIAL_CH.put(LocalChannel::new());

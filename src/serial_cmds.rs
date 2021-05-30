@@ -61,7 +61,9 @@ impl<'a> SerialSink<'a> {
                 self.write(buf.as_str()).await?;
                 self.write("\r\n").await
             }
-        }.await {
+        }
+        .await
+        {
             error!("failed to write to serial");
         }
     }
@@ -127,7 +129,6 @@ impl TwiCmd {
         twim: &mut twim::Twim,
         serial: &SerialSink<'_>,
     ) -> core::result::Result<(), twim::Error> {
-        let mut buf = [0u8; 16];
         match self {
             TwiCmd::Write(cmd) => {
                 writeln_serial!(
@@ -136,18 +137,17 @@ impl TwiCmd {
                     cmd.addr,
                     &cmd.data.buf[0..cmd.data.len as usize]
                 );
-                twim.write(cmd.addr, &cmd.data.buf[0..cmd.data.len as usize])
-                    .await?;
+                let mut transfer = twim.transfer()?;
+                transfer
+                    .write_buf(cmd.data.len as usize)?
+                    .copy_from_slice(&cmd.data.buf[0..cmd.data.len as usize]);
+                transfer.start(cmd.addr).await?;
             }
             &TwiCmd::Read(addr, count) => {
                 writeln_serial!(serial, "read({}, #{})", addr, count);
-                let count = count as usize;
-                if count > buf.len() {
-                    error!("read buffer too small");
-                    return Err(twim::Error::Overrun);
-                }
-                let buf = &mut buf[0..count];
-                twim.read(addr, buf).await?;
+                let mut transfer = twim.transfer()?;
+                transfer.read_len(count as usize)?;
+                let buf = transfer.start(addr).await?;
                 writeln_serial!(serial, "read: {:?}", buf);
             }
             TwiCmd::WriteRead(cmd, count) => {
@@ -158,14 +158,12 @@ impl TwiCmd {
                     &cmd.data.buf[0..cmd.data.len as usize],
                     count
                 );
-                let count = *count as usize;
-                if count > buf.len() {
-                    error!("read buffer too small");
-                    return Err(twim::Error::Overrun);
-                }
-                let buf = &mut buf[0..count];
-                twim.write_read(cmd.addr, &cmd.data.buf[0..cmd.data.len as usize], buf)
-                    .await?;
+                let mut transfer = twim.transfer()?;
+                transfer
+                    .write_buf(cmd.data.len as usize)?
+                    .copy_from_slice(&cmd.data.buf[0..cmd.data.len as usize]);
+                transfer.read_len(*count as usize)?;
+                let buf = transfer.start(cmd.addr).await?;
                 writeln_serial!(serial, "read: {:?}", buf);
             }
             &TwiCmd::SetValve(addr, open) => {
