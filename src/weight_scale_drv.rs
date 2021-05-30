@@ -34,41 +34,50 @@ impl<'a> WeightScaleDrv<'a> {
     }
 
     pub async fn set_valve(&mut self, open: bool) -> Result<(), Error> {
-        let mut transfer = self.twim.transfer()?;
-        transfer.write_buf(1)?[0] = if open {
-            Command::OpenValve
-        } else {
-            Command::CloseValve
-        } as u8;
-        transfer.start(self.addr).await.map(|_| ())
+        self.twim
+            .transfer()?
+            .write_byte(if open {
+                Command::OpenValve
+            } else {
+                Command::CloseValve
+            } as u8)?
+            .start(self.addr)
+            .await
+            .map(|_| ())
     }
 
     pub async fn set_watchdog(&mut self, enabled: bool) -> Result<(), Error> {
-        let mut transfer = self.twim.transfer()?;
-        transfer.write_buf(1)?[0] = if enabled {
-            Command::EnableWd
-        } else {
-            Command::DisableWd
-        } as u8;
-        transfer.start(self.addr).await.map(|_| ())
+        self.twim
+            .transfer()?
+            .write_byte(if enabled {
+                Command::EnableWd
+            } else {
+                Command::DisableWd
+            } as u8)?
+            .start(self.addr)
+            .await
+            .map(|_| ())
     }
 
     pub async fn sleep(&mut self) -> Result<(), Error> {
-        let mut transfer = self.twim.transfer()?;
-        transfer.write_buf(1)?[0] = Command::Sleep as u8;
-        transfer.start(self.addr).await.map(|_| ())
+        self.twim
+            .transfer()?
+            .write_byte(Command::Sleep as u8)?
+            .start(self.addr)
+            .await
+            .map(|_| ())
     }
 
     pub async fn read_temperature(&mut self) -> Result<u8, Error> {
-        let mut transfer = self.twim.transfer()?;
-        transfer.write_buf(1)?[0] = Command::GetTemp as u8;
-        transfer.start(self.addr).await?;
+        self.twim
+            .transfer()?
+            .write_byte(Command::GetTemp as u8)?
+            .start(self.addr)
+            .await?;
         time::Delay::new().delay_ms(2).await;
         let mut retries: usize = 0;
         Ok(loop {
-            transfer = self.twim.transfer()?;
-            transfer.read_len(1)?;
-            match transfer.start(self.addr).await {
+            match self.twim.transfer()?.read(1)?.start(self.addr).await {
                 Err(twim::Error::AddressNack) if retries < 10 => retries += 1,
                 res => break res,
             }
@@ -76,17 +85,9 @@ impl<'a> WeightScaleDrv<'a> {
     }
 
     pub async fn measure_weight(&mut self, time: Duration) -> Result<u32, Error> {
-        let mut transfer = self.twim.transfer()?;
-        let buf = transfer.write_buf(2)?;
-        buf[0] = Command::MeasureWeight as u8;
-        buf[1] = 1;
-        transfer.start(self.addr).await?;
+        self.twim.transfer()?.write(&[Command::MeasureWeight as u8, 1])?.start(self.addr).await?;
         time::Timer::after(time).await;
-
-        transfer = self.twim.transfer()?;
-        transfer.read_len(5)?;
-        let buf = transfer.start(self.addr).await?;
-
+        let buf = self.twim.transfer()?.read(5)?.start(self.addr).await?;
         let c = buf[0] as u32;
         Ok(((((buf[1] as u32) << 24)
             | ((buf[2] as u32) << 16)
