@@ -312,6 +312,21 @@ impl<'a> TransferSetup<'a> {
     pub fn start(self, addr: Address) -> Transfer<'a> {
         Transfer::new(self.twim, addr)
     }
+
+    pub fn write_byte(mut self, b: u8) -> Result<Self, Error> {
+        self.write_buf(1)?[0] = b;
+        Ok(self)
+    }
+
+    pub fn write(mut self, buf: &[u8]) -> Result<Self, Error> {
+        self.write_buf(buf.len())?.copy_from_slice(buf);
+        Ok(self)
+    }
+
+    pub fn read(mut self, n: usize) -> Result<Self, Error> {
+        self.read_len(n)?;
+        Ok(self)
+    }
 }
 
 enum TransferState<'a> {
