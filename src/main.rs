@@ -27,6 +27,8 @@ use panic_probe as _;
 use embassy_nrf::buffered_uarte::BufferedUarte;
 use embassy_nrf::gpio::NoPin;
 use embassy_nrf::{interrupt, peripherals, uarte, Peripherals};
+use hal::wdt::{self, Watchdog, WatchdogHandle};
+use nrf52832_hal as hal;
 
 #[macro_use]
 mod serial_cmds;
@@ -191,33 +193,68 @@ async fn serial_task(
     writeln_uart!(uart, "Serial closed");
 }
 
+async fn twi_transfer<'a>(
+    twim: &mut twim::Twim,
+    serial: &SerialSink<'a>,
+    cmd: TwiCmd,
+    wd_hndl: &mut WatchdogHandle<wdt::handles::HdlN>,
+) {
+    let (twim, stopper) = twim.borrow_stoppable();
+
+    let total = cmd.timeout();
+    let n = (2 * total.as_ticks() / WD_TIMEOUT.as_ticks()) as u32;
+    let rem = total - WD_TIMEOUT * n / 2;
+    info!("timeout: {} x {} + {}", WD_TIMEOUT / 2, n, rem);
+
+    let transfer = cmd.run(twim, &serial);
+    pin_mut!(transfer);
+
+    for _ in 0..n {
+        let timer = Timer::after(WD_TIMEOUT / 2);
+
+        if let Either::Left((_, _)) = futures::future::select(transfer.as_mut(), timer).await {
+            return;
+        }
+
+        wd_hndl.pet();
+    }
+
+    let timer = Timer::after(rem);
+    match futures::future::select(transfer, timer).await {
+        Either::Left((_, _)) => return,
+        Either::Right((_, transfer)) => {
+            stopper.stop();
+            info!("stopping");
+            writeln_serial!(serial, "timeout after {} ms", rem.as_millis());
+            // need to await the stopped transfer
+            transfer.await
+        }
+    };
+}
+
 #[embassy::task]
 async fn twi_task(
     mut twim: twim::Twim,
     cmd_sig: &'static Signal<TwiCmd>,
     serial: &'static SerialChannel,
+    mut wd_hndl: WatchdogHandle<wdt::handles::HdlN>,
 ) {
     let serial = SerialSink::new(serial);
     loop {
-        let cmd = cmd_sig.wait().await;
+        wd_hndl.pet();
 
-        let (twim, stopper) = twim.borrow_stoppable();
-        let timeout = cmd.timeout();
-        info!("timeout: {}", timeout);
-        let transfer = cmd.run(twim, &serial);
-        pin_mut!(transfer);
-        let timer = Timer::after(timeout);
-
-        let _ = match futures::future::select(transfer, timer).await {
-            Either::Left((r, _)) => r,
-            Either::Right((_, transfer)) => {
-                stopper.stop();
-                info!("stopping");
-                writeln_serial!(serial, "timeout after {} ms", timeout.as_millis());
-                // need to await the stopped transfer
-                transfer.await
+        // wait for cmd or time to pet watchdog
+        let cmd = {
+            let cmd_fut = cmd_sig.wait();
+            let wd_timer = Timer::after(WD_TIMEOUT / 2);
+            match futures::future::select(cmd_fut, wd_timer).await {
+                Either::Left((cmd, _)) => cmd,
+                Either::Right((_, _)) => continue,
             }
         };
+
+        wd_hndl.pet();
+        twi_transfer(&mut twim, &serial, cmd, &mut wd_hndl).await;
     }
 }
 
@@ -230,6 +267,22 @@ static SERIAL_CH: Forever<SerialChannel> = Forever::new();
 
 #[embassy::main]
 async fn main(spawner: Spawner, p: Peripherals) {
+    let pp = hal::pac::Peripherals::take().unwrap();
+
+    let mut wd = match Watchdog::try_new(pp.WDT) {
+        Ok(wd) => wd,
+        Err(_) => defmt::panic!("Watchdog already active"),
+    };
+
+    wd.set_lfosc_ticks(WD_TIMEOUT.as_ticks() as u32);
+
+    let wdt::Parts {
+        watchdog: _,
+        handles: (wrk_wd_hndl,),
+    } = wd.activate::<wdt::count::One>();
+
+    // let (wdh0, )
+
     let mut config = uarte::Config::default();
     config.parity = uarte::Parity::EXCLUDED;
     config.baudrate = uarte::Baudrate::BAUD115200;
@@ -268,5 +321,5 @@ async fn main(spawner: Spawner, p: Peripherals) {
     let serial_ch = SERIAL_CH.put(LocalChannel::new());
     let cmd_sig = TWICMD_SIGNAL.put(Signal::new());
     unwrap!(spawner.spawn(serial_task(uart, serial_ch, cmd_sig)));
-    unwrap!(spawner.spawn(twi_task(twim, cmd_sig, serial_ch)));
+    unwrap!(spawner.spawn(twi_task(twim, cmd_sig, serial_ch, wrk_wd_hndl.degrade())));
 }
