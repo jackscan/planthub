@@ -17,7 +17,7 @@ use defmt_rtt as _;
 use embassy::executor::Spawner;
 use embassy::io;
 use embassy::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt};
-use embassy::time::Timer;
+use embassy::time::{Duration, Timer};
 use embassy::util::{Forever, Signal};
 use futures::{pin_mut, Stream};
 use futures_intrusive::channel::LocalChannel;
@@ -35,6 +35,10 @@ use serial_cmds::{SerialChannel, SerialSink, TwiCmd};
 mod twim;
 
 mod weight_scale_drv;
+
+const WD_TIMEOUT: Duration = Duration::from_millis(500);
+
+defmt::timestamp!("{=u64}", { embassy::time::Instant::now().as_millis() });
 
 trait AsyncReadWrite: AsyncBufRead + AsyncWrite {}
 
