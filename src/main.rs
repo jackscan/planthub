@@ -232,7 +232,7 @@ async fn run_serial_cmd<'a>(
 }
 
 #[embassy::task]
-async fn twi_task(
+async fn worker_task(
     mut twim: twim::Twim,
     sercmd_sig: &'static Signal<serial::TwiCmd>,
     serial: &'static SerialChannel,
@@ -321,5 +321,5 @@ async fn main(spawner: Spawner, p: Peripherals) {
     let serial_ch = SERIAL_CH.put(LocalChannel::new());
     let sercmd_sig = SERCMD_SIGNAL.put(Signal::new());
     unwrap!(spawner.spawn(serial_task(uart, serial_ch, sercmd_sig)));
-    unwrap!(spawner.spawn(twi_task(twim, sercmd_sig, serial_ch, wrk_wd_hndl.degrade())));
+    unwrap!(spawner.spawn(worker_task(twim, sercmd_sig, serial_ch, wrk_wd_hndl.degrade())));
 }
