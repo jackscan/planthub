@@ -31,11 +31,10 @@ use hal::wdt::{self, Watchdog, WatchdogHandle};
 use nrf52832_hal as hal;
 
 #[macro_use]
-mod serial_cmds;
-use serial_cmds::{SerialChannel, SerialSink, TwiCmd};
+mod serial;
+use serial::{SerialChannel, SerialSink};
 
 mod twim;
-
 mod weight_scale_drv;
 
 const WD_TIMEOUT: Duration = Duration::from_millis(500);
@@ -73,7 +72,7 @@ macro_rules! writeln_uart {
 async fn serial_task(
     mut uart: Pin<&'static mut dyn AsyncReadWrite>,
     serial: &'static SerialChannel,
-    cmd_sig: &'static Signal<TwiCmd>,
+    cmd_sig: &'static Signal<serial::TwiCmd>,
 ) {
     info!("serial initialized");
     unwrap!(uart.write_all(b"Hello Serial!\r\n").await);
@@ -82,7 +81,7 @@ async fn serial_task(
     type SerialInBuffer = arrayvec::ArrayVec<u8, 64>;
 
     enum SerialTask {
-        SerialInput(serial_cmds::Result<TwiCmd>),
+        SerialInput(serial::Result<serial::TwiCmd>),
         ChannelClosed,
         InputTooLong,
     }
@@ -154,7 +153,7 @@ async fn serial_task(
                         // TODO: read until next new line before considering any input again
                         return Poll::Ready(SerialTask::InputTooLong);
                     } else if let Some(_) = has_line_brk {
-                        let r = serial_cmds::parse_cmd(in_buf.as_ref()).transpose();
+                        let r = serial::parse_cmd(in_buf.as_ref()).transpose();
                         in_buf.clear();
                         if let Some(r) = r {
                             return Poll::Ready(SerialTask::SerialInput(r));
@@ -193,10 +192,10 @@ async fn serial_task(
     writeln_uart!(uart, "Serial closed");
 }
 
-async fn twi_transfer<'a>(
+async fn run_serial_cmd<'a>(
     twim: &mut twim::Twim,
     serial: &SerialSink<'a>,
-    cmd: TwiCmd,
+    cmd: serial::TwiCmd,
     wd_hndl: &mut WatchdogHandle<wdt::handles::HdlN>,
 ) {
     let (twim, stopper) = twim.borrow_stoppable();
@@ -235,7 +234,7 @@ async fn twi_transfer<'a>(
 #[embassy::task]
 async fn twi_task(
     mut twim: twim::Twim,
-    cmd_sig: &'static Signal<TwiCmd>,
+    sercmd_sig: &'static Signal<serial::TwiCmd>,
     serial: &'static SerialChannel,
     mut wd_hndl: WatchdogHandle<wdt::handles::HdlN>,
 ) {
@@ -245,7 +244,7 @@ async fn twi_task(
 
         // wait for cmd or time to pet watchdog
         let cmd = {
-            let cmd_fut = cmd_sig.wait();
+            let cmd_fut = sercmd_sig.wait();
             let wd_timer = Timer::after(WD_TIMEOUT / 2);
             match futures::future::select(cmd_fut, wd_timer).await {
                 Either::Left((cmd, _)) => cmd,
@@ -254,7 +253,8 @@ async fn twi_task(
         };
 
         wd_hndl.pet();
-        twi_transfer(&mut twim, &serial, cmd, &mut wd_hndl).await;
+
+        run_serial_cmd(&mut twim, &serial, cmd, &mut wd_hndl).await;
     }
 }
 
@@ -262,7 +262,7 @@ type Uarte = BufferedUarte<'static, peripherals::UARTE0, peripherals::TIMER0>;
 impl<'a> AsyncReadWrite for Uarte {}
 
 static UARTE: Forever<Uarte> = Forever::new();
-static TWICMD_SIGNAL: Forever<Signal<TwiCmd>> = Forever::new();
+static SERCMD_SIGNAL: Forever<Signal<serial::TwiCmd>> = Forever::new();
 static SERIAL_CH: Forever<SerialChannel> = Forever::new();
 
 #[embassy::main]
@@ -319,7 +319,7 @@ async fn main(spawner: Spawner, p: Peripherals) {
     );
 
     let serial_ch = SERIAL_CH.put(LocalChannel::new());
-    let cmd_sig = TWICMD_SIGNAL.put(Signal::new());
-    unwrap!(spawner.spawn(serial_task(uart, serial_ch, cmd_sig)));
-    unwrap!(spawner.spawn(twi_task(twim, cmd_sig, serial_ch, wrk_wd_hndl.degrade())));
+    let sercmd_sig = SERCMD_SIGNAL.put(Signal::new());
+    unwrap!(spawner.spawn(serial_task(uart, serial_ch, sercmd_sig)));
+    unwrap!(spawner.spawn(twi_task(twim, sercmd_sig, serial_ch, wrk_wd_hndl.degrade())));
 }
