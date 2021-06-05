@@ -25,11 +25,16 @@ default-features = false
 features = ["xxAA-package", "rt"]
 version = "0.12.1"
 
+[dependencies.nrf-softdevice]
+features = ["nrf52832", "s112", "defmt", "defmt-trace", "ble-peripheral", "ble-gatt-server"]
+version = "0.1.0"
+
 [patch.crates-io]
 embassy = {git = "https://github.com/embassy-rs/embassy"}
 embassy-extras = {git = "https://github.com/embassy-rs/embassy"}
 embassy-nrf = {git = "https://github.com/embassy-rs/embassy"}
 embassy-traits = {git = "https://github.com/embassy-rs/embassy"}
+nrf-softdevice = {git = "https://github.com/akiles/nrf-softdevice/"}
 
 [features]
 default = ["defmt-default", "nrf52832"]

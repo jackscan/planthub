@@ -29,11 +29,13 @@ use embassy_nrf::gpio::NoPin;
 use embassy_nrf::{interrupt, peripherals, uarte, Peripherals};
 use hal::wdt::{self, Watchdog, WatchdogHandle};
 use nrf52832_hal as hal;
+use nrf_softdevice::{raw, Softdevice};
 
 #[macro_use]
 mod serial;
 use serial::{SerialChannel, SerialSink};
 
+mod ble;
 mod twim;
 mod weight_scale_drv;
 
@@ -235,6 +237,7 @@ async fn run_serial_cmd<'a>(
 async fn worker_task(
     mut twim: twim::Twim,
     sercmd_sig: &'static Signal<serial::TwiCmd>,
+    btcmd_sig: &'static Signal<ble::Command>,
     serial: &'static SerialChannel,
     mut wd_hndl: WatchdogHandle<wdt::handles::HdlN>,
 ) {
@@ -258,12 +261,18 @@ async fn worker_task(
     }
 }
 
+#[embassy::task]
+async fn softdevice_task(sd: &'static Softdevice) {
+    sd.run().await;
+}
+
 type Uarte = BufferedUarte<'static, peripherals::UARTE0, peripherals::TIMER0>;
 impl<'a> AsyncReadWrite for Uarte {}
 
 static UARTE: Forever<Uarte> = Forever::new();
 static SERCMD_SIGNAL: Forever<Signal<serial::TwiCmd>> = Forever::new();
 static SERIAL_CH: Forever<SerialChannel> = Forever::new();
+static BTCMD_SIGNAL: Forever<Signal<ble::Command>> = Forever::new();
 
 #[embassy::main]
 async fn main(spawner: Spawner, p: Peripherals) {
@@ -318,8 +327,76 @@ async fn main(spawner: Spawner, p: Peripherals) {
         unsafe { &mut TWIM_BUF },
     );
 
+    let sd_config = nrf_softdevice::Config {
+        // LFCLK oscillator source.
+        clock: Some(raw::nrf_clock_lf_cfg_t {
+            // LFCLK crystal oscillator
+            source: raw::NRF_CLOCK_LF_SRC_XTAL as u8,
+            // Only for ::NRF_CLOCK_LF_SRC_RC:
+            // Calibration timer interval in 1/4 second units (nRF52: 1-32).
+            rc_ctiv: 0,
+            // Only for ::NRF_CLOCK_LF_SRC_RC:
+            // How often (in number of calibration intervals) the RC oscillator shall be calibrated if the temperature hasn't changed. 0: Always calibrate even if the temperature hasn't changed. 1: Only calibrate if the temperature has changed (legacy - nRF51 only). 2-33: Check the temperature and only calibrate if it has changed, however calibration will take place every rc_temp_ctiv intervals in any case.
+            rc_temp_ctiv: 0,
+            // External clock accuracy used in the LL to compute timing windows.
+            accuracy: raw::NRF_CLOCK_LF_ACCURACY_20_PPM as u8,
+        }),
+        // BLE GAP connection configuration parameters.
+        conn_gap: Some(raw::ble_gap_conn_cfg_t {
+            // The number of concurrent connections the application can create with this configuration.
+            conn_count: 3,
+            // The time set aside for this connection on every connection interval in 1.25 ms units.
+            event_length: raw::BLE_GAP_EVENT_LENGTH_DEFAULT as u16,
+        }),
+        // Maximum size of ATT packet the SoftDevice can send or receive.
+        conn_gatt: Some(raw::ble_gatt_conn_cfg_t { att_mtu: 128 }),
+        // Attribute table size configuration.
+        gatts_attr_tab_size: Some(raw::ble_gatts_cfg_attr_tab_size_t {
+            // Attribute table size.
+            attr_tab_size: 32768,
+        }),
+        // Configuration of maximum concurrent connections in the peripheral role.
+        gap_role_count: Some(raw::ble_gap_cfg_role_count_t {
+            // Maximum number of advertising sets.
+            adv_set_count: 1,
+            // Maximum number of connections concurrently acting as a peripheral.
+            periph_role_count: 3,
+            // central_role_count: 3,
+            // central_sec_count: 0,
+            // _bitfield_1: raw::ble_gap_cfg_role_count_t::new_bitfield_1(0),
+        }),
+        // Device name and its properties.
+        gap_device_name: Some(raw::ble_gap_cfg_device_name_t {
+            // Pointer to where the value (device name) is stored or will be stored.
+            p_value: b"HelloRust" as *const u8 as _,
+            // Current length in bytes of the memory pointed to by p_value.
+            current_len: 9,
+            // Maximum length in bytes of the memory pointed to by p_value.
+            max_len: 9,
+            // Write permissions.
+            write_perm: unsafe { core::mem::zeroed() },
+            // Value location.
+            _bitfield_1: raw::ble_gap_cfg_device_name_t::new_bitfield_1(
+                // Attribute Value is located in stack memory, no user memory is required.
+                raw::BLE_GATTS_VLOC_STACK as u8,
+            ),
+        }),
+        ..Default::default()
+    };
+
+    let sd = Softdevice::enable(&sd_config);
+
     let serial_ch = SERIAL_CH.put(LocalChannel::new());
     let sercmd_sig = SERCMD_SIGNAL.put(Signal::new());
+    let btcmd_sig = BTCMD_SIGNAL.put(Signal::new());
+
+    unwrap!(spawner.spawn(softdevice_task(sd)));
     unwrap!(spawner.spawn(serial_task(uart, serial_ch, sercmd_sig)));
-    unwrap!(spawner.spawn(worker_task(twim, sercmd_sig, serial_ch, wrk_wd_hndl.degrade())));
+    unwrap!(spawner.spawn(worker_task(
+        twim,
+        sercmd_sig,
+        btcmd_sig,
+        serial_ch,
+        wrk_wd_hndl.degrade()
+    )));
 }
