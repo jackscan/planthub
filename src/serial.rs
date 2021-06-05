@@ -200,13 +200,13 @@ impl TwiCmd {
     }
 }
 
-pub struct TwiCmdParser<'a> {
+struct TwiCmdParser<'a> {
     line: &'a str,
     pos: usize,
 }
 
 impl<'a> TwiCmdParser<'a> {
-    pub fn from_str(line: &'a str) -> Self {
+    fn from_str(line: &'a str) -> Self {
         TwiCmdParser { line, pos: 0 }
     }
 
