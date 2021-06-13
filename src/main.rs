@@ -36,6 +36,7 @@ mod serial;
 use serial::{SerialChannel, SerialSink};
 
 mod ble;
+mod plant;
 mod twim;
 mod weight_scale_drv;
 
