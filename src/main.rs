@@ -242,22 +242,29 @@ async fn worker_task(
     mut wd_hndl: WatchdogHandle<wdt::handles::HdlN>,
 ) {
     let serial = SerialSink::new(serial);
+
     loop {
         wd_hndl.pet();
 
+        let sercmd_fut = sercmd_sig.wait();
+        let btcmd_fut = btcmd_sig.wait();
+        let cmd_fut = futures::future::select(sercmd_fut, btcmd_fut);
+        let wd_timer = Timer::after(WD_TIMEOUT / 2);
+
         // wait for cmd or time to pet watchdog
-        let cmd = {
-            let cmd_fut = sercmd_sig.wait();
-            let wd_timer = Timer::after(WD_TIMEOUT / 2);
-            match futures::future::select(cmd_fut, wd_timer).await {
-                Either::Left((cmd, _)) => cmd,
-                Either::Right((_, _)) => continue,
-            }
+        let cmd = match futures::future::select(cmd_fut, wd_timer).await {
+            Either::Left((cmd, _)) => cmd,
+            Either::Right((_, _)) => continue,
         };
 
         wd_hndl.pet();
 
-        run_serial_cmd(&mut twim, &serial, cmd, &mut wd_hndl).await;
+        match cmd {
+            Either::Left((sercmd, _)) => {
+                run_serial_cmd(&mut twim, &serial, sercmd, &mut wd_hndl).await;
+            }
+            Either::Right((btcmd, _)) => info!("TODO: dispatch {}", btcmd),
+        };
     }
 }
 
