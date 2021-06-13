@@ -1,16 +1,12 @@
-use core::convert::TryInto;
-use core::pin::Pin;
-
 use defmt::{error, info};
 use embassy::util::Signal;
 use futures::future::Either;
-use futures::{Stream, StreamExt};
-use futures_intrusive::channel::LocalChannel;
+use futures::pin_mut;
 
 use nrf_softdevice::ble::{gatt_server, peripheral, Connection, FixedGattValue};
 use nrf_softdevice::{raw, Softdevice};
 
-pub type PlantId = u8;
+use crate::plant::{Id as PlantId, Info as PlantInfo, StatusList as PlantStates};
 
 #[nrf_softdevice::gatt_server(uuid = "c93d0001-8a71-016b-9c51-646db9d6a8fd")]
 struct PlantService {
@@ -26,14 +22,6 @@ enum Update {
 }
 
 #[derive(defmt::Format)]
-#[repr(C)]
-pub struct PlantInfo {
-    id: PlantId,
-    temperature: i8,
-    weight: u16,
-}
-
-#[derive(defmt::Format)]
 #[repr(C, u8)]
 pub enum Command {
     None,
@@ -41,19 +29,9 @@ pub enum Command {
     Watering(PlantId, u16, u16, u16),
 }
 
-struct Server {
+pub struct Server {
     srv: PlantService,
     sd: &'static Softdevice,
-}
-
-impl PlantInfo {
-    pub fn new(id: PlantId, temperature: i8, weight: u16) -> Self {
-        Self {
-            id,
-            temperature,
-            weight,
-        }
-    }
 }
 
 impl FixedGattValue for PlantInfo {
@@ -116,13 +94,12 @@ impl Server {
     }
 
     pub async fn serve(
-        &mut self,
+        &self,
         conn: Connection,
-        upd: &'static mut dyn Stream<Item = Update>,
         cmd_sig: &'static Signal<Command>,
+        plant_states: &'static PlantStates<'static>,
     ) {
         let ref srv = self.srv;
-        let mut upd_ch = Pin::static_mut(upd);
         defmt::unwrap!(srv.plant_info_set(PlantInfo::new(0, 0, 0)));
         defmt::unwrap!(srv.cmd_set(Command::None));
 
@@ -137,7 +114,7 @@ impl Server {
 
             PlantServiceEvent::PlantInfoNotificationsEnabled => {
                 info!("notifications enabled");
-                cmd_sig.signal(Command::Measure);
+                // cmd_sig.signal(Command::Measure);
             }
             PlantServiceEvent::PlantInfoNotificationsDisabled => {
                 info!("notifications disabled");
@@ -146,34 +123,30 @@ impl Server {
         });
 
         futures::pin_mut!(srvfut);
-        let mut updfut = upd_ch.next();
+        let mut upd_stamp = None;
 
         loop {
-            let (s, u) = match futures::future::select(srvfut, updfut).await {
+            let updfut = plant_states.next_update(&mut upd_stamp);
+            pin_mut!(updfut);
+
+            match futures::future::select(srvfut, updfut).await {
                 Either::Left((res, _)) => {
                     if let Err(e) = res {
                         error!("gatt_server run exited with error: {:?}", e);
                     }
                     break;
                 }
-                Either::Right((None, _)) => {
-                    info!("stream closed, exiting");
-                    return;
-                }
-                Either::Right((Some(upd), sfut)) => {
-                    info!("update: {}", upd);
-                    match upd {
-                        Update::Plant(info) => {
-                            if let Err(e) = srv.plant_info_set(info) {
-                                error!("failed to set plant_info: {}", e);
-                            }
+                Either::Right((iter, sfut)) => {
+                    for upd in iter {
+                        info!("update: {}", upd);
+
+                        if let Err(e) = srv.plant_info_set(upd) {
+                            error!("failed to set plant_info: {}", e);
                         }
-                    };
-                    (sfut, upd_ch.next())
+                    }
+                    srvfut = sfut;
                 }
             };
-            srvfut = s;
-            updfut = u;
         }
     }
 }
