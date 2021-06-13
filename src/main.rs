@@ -17,7 +17,7 @@ use defmt_rtt as _;
 use embassy::executor::Spawner;
 use embassy::io;
 use embassy::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt};
-use embassy::time::{Duration, Timer};
+use embassy::time::{Duration, Instant, Timer};
 use embassy::util::{Forever, Signal};
 use futures::{pin_mut, Stream};
 use futures_intrusive::channel::LocalChannel;
@@ -245,6 +245,8 @@ async fn worker_task(
 ) {
     let serial = SerialSink::new(serial);
 
+    let upd_time = Instant::now() + Duration::from_secs(60);
+
     loop {
         wd_hndl.pet();
 
@@ -252,11 +254,17 @@ async fn worker_task(
         let btcmd_fut = btcmd_sig.wait();
         let cmd_fut = futures::future::select(sercmd_fut, btcmd_fut);
         let wd_timer = Timer::after(WD_TIMEOUT / 2);
+        let upd_timer = Timer::at(upd_time);
+        let time_fut = futures::future::select(upd_timer, wd_timer);
 
         // wait for cmd or time to pet watchdog
-        let cmd = match futures::future::select(cmd_fut, wd_timer).await {
+        let cmd = match futures::future::select(cmd_fut, time_fut).await {
             Either::Left((cmd, _)) => cmd,
-            Either::Right((_, _)) => continue,
+            Either::Right((Either::Left(_), _)) => {
+                info!("TODO: update plant states");
+                continue;
+            }
+            Either::Right((Either::Right(_), _)) => continue,
         };
 
         wd_hndl.pet();
