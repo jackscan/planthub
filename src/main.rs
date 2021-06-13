@@ -241,6 +241,7 @@ async fn worker_task(
     btcmd_sig: &'static Signal<ble::Command>,
     serial: &'static SerialChannel,
     mut wd_hndl: WatchdogHandle<wdt::handles::HdlN>,
+    plant_states: &'static plant::StatusList<'static>,
 ) {
     let serial = SerialSink::new(serial);
 
@@ -281,6 +282,7 @@ static UARTE: Forever<Uarte> = Forever::new();
 static SERCMD_SIGNAL: Forever<Signal<serial::TwiCmd>> = Forever::new();
 static SERIAL_CH: Forever<SerialChannel> = Forever::new();
 static BTCMD_SIGNAL: Forever<Signal<ble::Command>> = Forever::new();
+static PLANT_STATES: Forever<plant::StatusList> = Forever::new();
 
 #[embassy::main]
 async fn main(spawner: Spawner, p: Peripherals) {
@@ -398,6 +400,9 @@ async fn main(spawner: Spawner, p: Peripherals) {
     let sercmd_sig = SERCMD_SIGNAL.put(Signal::new());
     let btcmd_sig = BTCMD_SIGNAL.put(Signal::new());
 
+    static mut PLANT_STATUS_ARRAY: [plant::StampedInfo; 8] = [(0, plant::Info::new(0, 0, 0)); 8];
+    let plant_states = PLANT_STATES.put(plant::StatusList::new(unsafe { &mut PLANT_STATUS_ARRAY }));
+
     unwrap!(spawner.spawn(softdevice_task(sd)));
     unwrap!(spawner.spawn(serial_task(uart, serial_ch, sercmd_sig)));
     unwrap!(spawner.spawn(worker_task(
@@ -405,6 +410,7 @@ async fn main(spawner: Spawner, p: Peripherals) {
         sercmd_sig,
         btcmd_sig,
         serial_ch,
-        wrk_wd_hndl.degrade()
+        wrk_wd_hndl.degrade(),
+        plant_states,
     )));
 }
