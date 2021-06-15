@@ -68,7 +68,7 @@ impl<'a> WeightScaleDrv<'a> {
             .map(|_| ())
     }
 
-    pub async fn read_temperature(&mut self) -> Result<u8, Error> {
+    pub async fn read_temperature(&mut self) -> Result<i8, Error> {
         self.twim
             .transfer()?
             .write_byte(Command::GetTemp as u8)?
@@ -81,7 +81,7 @@ impl<'a> WeightScaleDrv<'a> {
                 Err(twim::Error::AddressNack) if retries < 10 => retries += 1,
                 res => break res,
             }
-        }?[0])
+        }?[0] as i8)
     }
 
     pub async fn measure_weight(&mut self, time: Duration) -> Result<u32, Error> {
