@@ -40,6 +40,8 @@ mod plant;
 mod twim;
 mod weight_scale_drv;
 
+use crate::weight_scale_drv::WeightScaleDrv;
+
 const WD_TIMEOUT: Duration = Duration::from_millis(500);
 
 defmt::timestamp!("{=u64}", { embassy::time::Instant::now().as_millis() });
@@ -234,6 +236,27 @@ async fn run_serial_cmd<'a>(
     };
 }
 
+async fn scan_twim<const CAP: usize>(
+    twim: &mut twim::Twim,
+    start: twim::Address,
+    end: twim::Address,
+    list: &mut arrayvec::ArrayVec<twim::Address, CAP>,
+    wd_hndl: &mut WatchdogHandle<wdt::handles::HdlN>,
+) -> usize {
+    let mut count = 0;
+    for addr in start..end {
+        let mut drv = WeightScaleDrv::new(twim, addr);
+        if drv.sleep().await.is_ok() {
+            count += 1;
+            if list.len() <= list.capacity() {
+                list.push(addr);
+            }
+        }
+        wd_hndl.pet();
+    }
+    count
+}
+
 #[embassy::task]
 async fn worker_task(
     mut twim: twim::Twim,
@@ -246,6 +269,11 @@ async fn worker_task(
     let serial = SerialSink::new(serial);
 
     let upd_time = Instant::now() + Duration::from_secs(60);
+    let mut plant_list = arrayvec::ArrayVec::<twim::Address, 8>::new();
+
+    let n = scan_twim(&mut twim, 0x40, 0x60, &mut plant_list, &mut wd_hndl).await;
+
+    info!("Found {} plant sensor(s)", n);
 
     loop {
         wd_hndl.pet();
