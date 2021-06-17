@@ -85,8 +85,21 @@ impl<'a> WeightScaleDrv<'a> {
     }
 
     pub async fn measure_weight(&mut self, time: Duration) -> Result<u32, Error> {
-        self.twim.transfer()?.write(&[Command::MeasureWeight as u8, 1])?.start(self.addr).await?;
+        self.start_weight_measurement().await?;
         time::Timer::after(time).await;
+        self.read_weight().await
+    }
+
+    pub async fn start_weight_measurement(&mut self) -> Result<(), Error> {
+        self.twim
+            .transfer()?
+            .write(&[Command::MeasureWeight as u8, 1])?
+            .start(self.addr)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn read_weight(&mut self) -> Result<u32, Error> {
         let buf = self.twim.transfer()?.read(5)?.start(self.addr).await?;
         let c = buf[0] as u32;
         Ok(((((buf[1] as u32) << 24)
