@@ -257,6 +257,51 @@ async fn scan_twim<const CAP: usize>(
     count
 }
 
+async fn measure_plants(
+    twim: &mut twim::Twim,
+    list: &[twim::Address],
+    plant_states: &plant::StatusList<'_>,
+    wd_hndl: &mut WatchdogHandle<wdt::handles::HdlN>,
+) {
+    for &addr in list {
+        let mut drv = WeightScaleDrv::new(twim, addr);
+        match drv.read_temperature().await {
+            Err(e) => error!("plant {:x}: error on reading temperature: {}", addr, e),
+            Ok(t) => {
+                info!("plant {:x}: temperature: {}", addr, t);
+                if let Err(e) = drv.start_weight_measurement().await {
+                    error!(
+                        "plant {:x}: error on starting weight measurement: {}",
+                        addr, e
+                    );
+                } else {
+                    // wait for 7 seconds
+                    const WAIT_TIME: Duration = Duration::from_millis(7000);
+                    const NUM_WD_CYCLES: u64 = WAIT_TIME.as_ticks() * 2 / WD_TIMEOUT.as_ticks();
+                    for _ in 0..NUM_WD_CYCLES {
+                        Timer::after(WD_TIMEOUT / 2).await;
+                        wd_hndl.pet();
+                    }
+                    // read weight
+                    match drv.read_weight().await {
+                        Ok(w) => {
+                            info!("plant {:x}: weight: {}", addr, w);
+                            plant_states
+                                .update(plant::Info {
+                                    id: addr as _,
+                                    temperature: t,
+                                    weight: core::cmp::max(w, 0xFFFF) as u16,
+                                })
+                                .await;
+                        }
+                        Err(e) => error! {"plant {:x}: error on reading weight: {}", addr, e},
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[embassy::task]
 async fn worker_task(
     mut twim: twim::Twim,
@@ -268,7 +313,7 @@ async fn worker_task(
 ) {
     let serial = SerialSink::new(serial);
 
-    let upd_time = Instant::now() + Duration::from_secs(60);
+    let mut upd_time = Instant::now() + Duration::from_secs(60);
     let mut plant_list = arrayvec::ArrayVec::<twim::Address, 8>::new();
 
     let n = scan_twim(&mut twim, 0x40, 0x60, &mut plant_list, &mut wd_hndl).await;
@@ -289,7 +334,10 @@ async fn worker_task(
         let cmd = match futures::future::select(cmd_fut, time_fut).await {
             Either::Left((cmd, _)) => cmd,
             Either::Right((Either::Left(_), _)) => {
-                info!("TODO: update plant states");
+                measure_plants(&mut twim, &plant_list, plant_states, &mut wd_hndl).await;
+                while upd_time < Instant::now() {
+                    upd_time += Duration::from_secs(60);
+                }
                 continue;
             }
             Either::Right((Either::Right(_), _)) => continue,
