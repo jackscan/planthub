@@ -355,6 +355,20 @@ async fn worker_task(
 }
 
 #[embassy::task]
+async fn ble_task(
+    sd: &'static Softdevice,
+    cmd_sig: &'static Signal<ble::Command>,
+    plant_states: &'static plant::StatusList<'static>,
+) {
+    let server = ble::Server::new(sd);
+
+    loop {
+        let conn = server.advertise().await;
+        server.serve(conn, cmd_sig, plant_states).await;
+    }
+}
+
+#[embassy::task]
 async fn softdevice_task(sd: &'static Softdevice) {
     sd.run().await;
 }
@@ -488,6 +502,7 @@ async fn main(spawner: Spawner, p: Peripherals) {
     let plant_states = PLANT_STATES.put(plant::StatusList::new(unsafe { &mut PLANT_STATUS_ARRAY }));
 
     unwrap!(spawner.spawn(softdevice_task(sd)));
+    unwrap!(spawner.spawn(ble_task(sd, btcmd_sig, plant_states)));
     unwrap!(spawner.spawn(serial_task(uart, serial_ch, sercmd_sig)));
     unwrap!(spawner.spawn(worker_task(
         twim,
