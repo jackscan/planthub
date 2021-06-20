@@ -10,6 +10,7 @@
 
 use core::fmt::Write;
 use core::pin::Pin;
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::Poll;
 
 use defmt::{error, info, unwrap};
@@ -26,7 +27,7 @@ use panic_probe as _;
 
 use embassy_nrf::buffered_uarte::BufferedUarte;
 use embassy_nrf::gpio::NoPin;
-use embassy_nrf::{interrupt, peripherals, uarte, Peripherals};
+use embassy_nrf::{interrupt, peripherals, rtc, uarte, Peripherals};
 use hal::wdt::{self, Watchdog, WatchdogHandle};
 use nrf52832_hal as hal;
 use nrf_softdevice::{raw, Softdevice};
@@ -43,8 +44,15 @@ mod weight_scale_drv;
 use crate::weight_scale_drv::WeightScaleDrv;
 
 const WD_TIMEOUT: Duration = Duration::from_millis(500);
+static CLOCK_STARTED: AtomicBool = AtomicBool::new(false);
 
-defmt::timestamp!("{=u64}", { embassy::time::Instant::now().as_millis() });
+defmt::timestamp!("{=u64}", {
+    if CLOCK_STARTED.load(Ordering::Acquire) {
+        embassy::time::Instant::now().as_millis()
+    } else {
+        0
+    }
+});
 
 trait AsyncReadWrite: AsyncBufRead + AsyncWrite {}
 
@@ -376,64 +384,20 @@ async fn softdevice_task(sd: &'static Softdevice) {
 type Uarte = BufferedUarte<'static, peripherals::UARTE0, peripherals::TIMER0>;
 impl<'a> AsyncReadWrite for Uarte {}
 
+static EXECUTOR: Forever<embassy::executor::Executor> = Forever::new();
+static RTC: Forever<rtc::RTC<peripherals::RTC1>> = Forever::new();
+static ALARM: Forever<rtc::Alarm<peripherals::RTC1>> = Forever::new();
 static UARTE: Forever<Uarte> = Forever::new();
 static SERCMD_SIGNAL: Forever<Signal<serial::TwiCmd>> = Forever::new();
 static SERIAL_CH: Forever<SerialChannel> = Forever::new();
 static BTCMD_SIGNAL: Forever<Signal<ble::Command>> = Forever::new();
 static PLANT_STATES: Forever<plant::StatusList> = Forever::new();
 
-#[embassy::main]
-async fn main(spawner: Spawner, p: Peripherals) {
-    let pp = hal::pac::Peripherals::take().unwrap();
-
-    let mut wd = match Watchdog::try_new(pp.WDT) {
-        Ok(wd) => wd,
-        Err(_) => defmt::panic!("Watchdog already active"),
-    };
-
-    wd.set_lfosc_ticks(WD_TIMEOUT.as_ticks() as u32);
-
-    let wdt::Parts {
-        watchdog: _,
-        handles: (wrk_wd_hndl,),
-    } = wd.activate::<wdt::count::One>();
-
-    // let (wdh0, )
-
-    let mut config = uarte::Config::default();
-    config.parity = uarte::Parity::EXCLUDED;
-    config.baudrate = uarte::Baudrate::BAUD115200;
-    static mut RX_BUF: [u8; 32] = [0u8; 32];
-    static mut TX_BUF: [u8; 32] = [0u8; 32];
-
-    let uart = UARTE.put(unsafe {
-        BufferedUarte::new(
-            p.UARTE0,
-            p.TIMER0,
-            p.PPI_CH0,
-            p.PPI_CH1,
-            interrupt::take!(UARTE0_UART0),
-            p.P0_08,
-            p.P0_06,
-            NoPin,
-            NoPin,
-            config,
-            &mut RX_BUF,
-            &mut TX_BUF,
-        )
-    });
-
-    let uart = Pin::static_mut(uart);
-
-    static mut TWIM_BUF: [u8; 32] = [0u8; 32];
-    let twim = twim::Twim::new(
-        p.TWISPI0,
-        interrupt::take!(SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0),
-        p.P0_26,
-        p.P0_25,
-        twim::Frequency::K100,
-        unsafe { &mut TWIM_BUF },
-    );
+#[cortex_m_rt::entry]
+fn main() -> ! {
+    let mut config = embassy_nrf::config::Config::default();
+    config.gpiote_interrupt_priority = embassy_nrf::interrupt::Priority::P2;
+    let p = embassy_nrf::init(config);
 
     let sd_config = nrf_softdevice::Config {
         // LFCLK oscillator source.
@@ -494,22 +458,86 @@ async fn main(spawner: Spawner, p: Peripherals) {
 
     let sd = Softdevice::enable(&sd_config);
 
-    let serial_ch = SERIAL_CH.put(LocalChannel::new());
-    let sercmd_sig = SERCMD_SIGNAL.put(Signal::new());
-    let btcmd_sig = BTCMD_SIGNAL.put(Signal::new());
+    let rtc = RTC.put(rtc::RTC::new(
+        unsafe { <peripherals::RTC1 as embassy::util::Steal>::steal() },
+        interrupt::take!(RTC1),
+    ));
+    rtc.start();
+    let alarm = ALARM.put(rtc.alarm0());
+    unsafe { embassy::time::set_clock(rtc) };
+    CLOCK_STARTED.store(true, Ordering::Release);
 
-    static mut PLANT_STATUS_ARRAY: [plant::StampedInfo; 8] = [(0, plant::Info::new(0, 0, 0)); 8];
-    let plant_states = PLANT_STATES.put(plant::StatusList::new(unsafe { &mut PLANT_STATUS_ARRAY }));
+    let pp = hal::pac::Peripherals::take().unwrap();
+    let mut wd = match Watchdog::try_new(pp.WDT) {
+        Ok(wd) => wd,
+        Err(_) => defmt::panic!("Watchdog already active"),
+    };
 
-    unwrap!(spawner.spawn(softdevice_task(sd)));
-    unwrap!(spawner.spawn(ble_task(sd, btcmd_sig, plant_states)));
-    unwrap!(spawner.spawn(serial_task(uart, serial_ch, sercmd_sig)));
-    unwrap!(spawner.spawn(worker_task(
-        twim,
-        sercmd_sig,
-        btcmd_sig,
-        serial_ch,
-        wrk_wd_hndl.degrade(),
-        plant_states,
-    )));
+    wd.set_lfosc_ticks(WD_TIMEOUT.as_ticks() as u32);
+
+    let wdt::Parts {
+        watchdog: _,
+        handles: (wrk_wd_hndl,),
+    } = wd.activate::<wdt::count::One>();
+
+    let executor = EXECUTOR.put(embassy::executor::Executor::new());
+    executor.set_alarm(alarm);
+
+    executor.run(|spawner| {
+        let mut config = uarte::Config::default();
+        config.parity = uarte::Parity::EXCLUDED;
+        config.baudrate = uarte::Baudrate::BAUD115200;
+        static mut RX_BUF: [u8; 32] = [0u8; 32];
+        static mut TX_BUF: [u8; 32] = [0u8; 32];
+
+        let uart = UARTE.put(unsafe {
+            BufferedUarte::new(
+                p.UARTE0,
+                p.TIMER0,
+                p.PPI_CH0,
+                p.PPI_CH1,
+                interrupt::take!(UARTE0_UART0),
+                p.P0_08,
+                p.P0_06,
+                NoPin,
+                NoPin,
+                config,
+                &mut RX_BUF,
+                &mut TX_BUF,
+            )
+        });
+
+        let uart = Pin::static_mut(uart);
+
+        static mut TWIM_BUF: [u8; 32] = [0u8; 32];
+        let twim = twim::Twim::new(
+            p.TWISPI0,
+            interrupt::take!(SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0),
+            p.P0_26,
+            p.P0_25,
+            twim::Frequency::K100,
+            unsafe { &mut TWIM_BUF },
+        );
+
+        let serial_ch = SERIAL_CH.put(LocalChannel::new());
+        let sercmd_sig = SERCMD_SIGNAL.put(Signal::new());
+        let btcmd_sig = BTCMD_SIGNAL.put(Signal::new());
+
+        static mut PLANT_STATUS_ARRAY: [plant::StampedInfo; 8] =
+            [(0, plant::Info::new(0, 0, 0)); 8];
+        let plant_states =
+            PLANT_STATES.put(plant::StatusList::new(unsafe { &mut PLANT_STATUS_ARRAY }));
+
+        unwrap!(spawner.spawn(softdevice_task(sd)));
+        unwrap!(spawner.spawn(ble_task(sd, btcmd_sig, plant_states)));
+        unwrap!(spawner.spawn(serial_task(uart, serial_ch, sercmd_sig)));
+        unwrap!(spawner.spawn(worker_task(
+            twim,
+            sercmd_sig,
+            btcmd_sig,
+            serial_ch,
+            wrk_wd_hndl.degrade(),
+            plant_states,
+        )));
+    });
 }
