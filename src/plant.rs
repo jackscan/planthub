@@ -80,8 +80,7 @@ impl<'a> StatusList<'a> {
 
         list.remove_old(max_age);
 
-        if let Some(idx) = list
-            .data
+        if let Some(idx) = list.data[..list.size]
             .iter()
             .position(|e| e.1.id == info.id)
             .or_else(|| {
@@ -93,7 +92,7 @@ impl<'a> StatusList<'a> {
                 }
             })
         {
-            info!("update {}", info);
+            info!("update {} of {}:  {}", idx, list.size, info);
             list.data[idx] = (list.stamp, info);
             self.sig.signal(());
         } else {
@@ -102,7 +101,6 @@ impl<'a> StatusList<'a> {
     }
 
     pub async fn next_update<'i>(&'i self, stamp: &mut Option<Stamp>) -> Iter<'i, 'a> {
-
         if stamp.is_some() {
             self.sig.wait().await;
         }
@@ -130,14 +128,17 @@ impl<'a> StatusList<'a> {
 impl<'i, 'a: 'i> Iterator for Iter<'i, 'a> {
     type Item = Info;
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(i) = self.list.data.iter().skip(self.index).position(|&(u, _)| {
-            (self.lower <= u && u < self.upper)
-                || (self.lower > self.upper && (self.lower <= u || u < self.upper))
-        }) {
-            self.index += i;
-            Some(self.list.data[self.index].1)
+        if let Some(i) = self.list.data[self.index..self.list.size]
+            .iter()
+            .position(|&(u, _)| {
+                (self.lower <= u && u < self.upper)
+                    || (self.lower > self.upper && (self.lower <= u || u < self.upper))
+            })
+        {
+            self.index += i + 1;
+            Some(self.list.data[self.index - 1].1)
         } else {
-            self.index = self.list.data.len();
+            self.index = self.list.size;
             None
         }
     }
