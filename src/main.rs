@@ -381,7 +381,7 @@ async fn softdevice_task(sd: &'static Softdevice) {
     sd.run().await;
 }
 
-type Uarte = BufferedUarte<'static, peripherals::UARTE0, peripherals::TIMER0>;
+type Uarte = BufferedUarte<'static, peripherals::UARTE0, peripherals::TIMER1>;
 impl<'a> AsyncReadWrite for Uarte {}
 
 static EXECUTOR: Forever<embassy::executor::Executor> = Forever::new();
@@ -493,7 +493,7 @@ fn main() -> ! {
         let uart = UARTE.put(unsafe {
             BufferedUarte::new(
                 p.UARTE0,
-                p.TIMER0,
+                p.TIMER1,
                 p.PPI_CH0,
                 p.PPI_CH1,
                 interrupt::take!(UARTE0_UART0),
