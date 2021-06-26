@@ -304,6 +304,10 @@ async fn measure_plants(
                         }
                         Err(e) => error! {"plant {:x}: error on reading weight: {}", addr, e},
                     }
+
+                    if let Err(e) = drv.sleep().await {
+                        error! {"plant {:x}: error sending sleep command: {}", addr, e};
+                    }
                 }
             }
         }
