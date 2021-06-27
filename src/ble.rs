@@ -126,6 +126,7 @@ impl Server {
         let mut upd_stamp = None;
 
         loop {
+            info!("stamp: {}", upd_stamp);
             let updfut = plant_states.next_update(&mut upd_stamp);
             pin_mut!(updfut);
 
@@ -137,8 +138,10 @@ impl Server {
                     break;
                 }
                 Either::Right((iter, sfut)) => {
+                    let mut i = 0;
                     for upd in iter {
-                        info!("update: {}", upd);
+                        info!("update[{}]: {}", i, upd);
+                        i += 1;
 
                         if let Err(e) = srv.plant_info_set(upd) {
                             error!("failed to set plant_info: {}", e);
