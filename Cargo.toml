@@ -26,7 +26,7 @@ features = ["xxAA-package", "rt"]
 version = "0.12.1"
 
 [dependencies.nrf-softdevice]
-features = ["nrf52832", "s112", "defmt", "defmt-trace", "ble-peripheral", "ble-gatt-server"]
+features = ["nrf52832", "s112", "defmt", "defmt-trace", "ble-peripheral", "ble-gatt-server", "critical-section-impl"]
 version = "0.1.0"
 
 [patch.crates-io]
@@ -50,3 +50,6 @@ nrf52832 = []
 bench = false
 name = "planthub"
 test = false
+
+[profile.release]
+debug = 1 # default is `false`; using `true` is also OK as symbols reside on the host, not the target
