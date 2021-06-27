@@ -145,6 +145,8 @@ impl Server {
 
                         if let Err(e) = srv.plant_info_set(upd) {
                             error!("failed to set plant_info: {}", e);
+                        } else if let Err(e) = srv.plant_info_notify(&conn, upd) {
+                            error!("failed to notify plant_info: {}", e);
                         }
                     }
                     srvfut = sfut;
