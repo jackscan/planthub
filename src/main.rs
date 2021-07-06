@@ -298,7 +298,7 @@ async fn measure_plants(
                                 .update(plant::Info {
                                     id: addr as _,
                                     temperature: t,
-                                    weight: core::cmp::max(w, 0xFFFF) as u16,
+                                    weight: core::cmp::min(w, 0xFFFF) as u16,
                                 })
                                 .await;
                         }
