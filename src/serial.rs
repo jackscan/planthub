@@ -51,7 +51,7 @@ impl<'a> SerialSink<'a> {
 
     pub async fn writeln_fmt(&self, args: core::fmt::Arguments<'_>) {
         if let Err(_) = async {
-            let mut buf = arrayvec::ArrayString::<64>::new();
+            let mut buf = arrayvec::ArrayString::<128>::new();
             let res = buf.write_fmt(args);
             if let Err(_) = res {
                 error!("formatting error");
