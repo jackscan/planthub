@@ -100,6 +100,7 @@ pub enum TwiCmd {
     SetValve(TwiAddr, bool),
     SetWatchdog(TwiAddr, bool),
     MeasureWeight(TwiAddr, u16),
+    GetVersion(TwiAddr),
     Sleep(TwiAddr),
 }
 
@@ -113,6 +114,7 @@ impl TwiCmd {
             TwiCmd::SetValve(_, _) => 10,
             TwiCmd::SetWatchdog(_, _) => 10,
             TwiCmd::MeasureWeight(_, ms) => (ms + 20) as u64,
+            TwiCmd::GetVersion(_) => 10,
             TwiCmd::Sleep(_) => 10,
         })
     }
@@ -188,6 +190,19 @@ impl TwiCmd {
                 let mut drv = WeightScaleDrv::new(twim, addr);
                 let w = drv.measure_weight(Duration::from_millis(ms as u64)).await?;
                 writeln_serial!(serial, "weight: {}", w);
+                drv.sleep().await?;
+            }
+            &TwiCmd::GetVersion(addr) => {
+                let mut drv = WeightScaleDrv::new(twim, addr);
+                let ver = drv.read_version().await?;
+                writeln_serial!(
+                    serial,
+                    "version {}.{}.{} {:x}",
+                    ver.major,
+                    ver.minor,
+                    ver.patch,
+                    ver.hash
+                );
                 drv.sleep().await?;
             }
             &TwiCmd::Sleep(addr) => {
@@ -357,6 +372,7 @@ impl<'a> TwiCmdParser<'a> {
                         .ok_or(ParseError::new("expected delay", self.pos))?;
                     TwiCmd::MeasureWeight(addr, ms)
                 }
+                "i" => TwiCmd::GetVersion(self.parse_addr()?),
                 "s" => TwiCmd::Sleep(self.parse_addr()?),
                 _ => return Err(ParseError::new("unknown command", p)),
             })

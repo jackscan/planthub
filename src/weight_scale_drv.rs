@@ -10,6 +10,13 @@ pub struct WeightScaleDrv<'a> {
     addr: twim::Address,
 }
 
+pub struct Version {
+    pub major: u8,
+    pub minor: u8,
+    pub patch: u8,
+    pub hash: u16,
+}
+
 #[repr(u8)]
 enum Command {
     Sleep = 0x00,
@@ -25,6 +32,7 @@ enum Command {
     SetAddr = 0xA3,
     AddrWrite = 0xA6,
     DisableWd = 0xA9,
+    GetVersion = 0xE0,
 }
 
 // Safety: Transfer futures must be awaited.
@@ -66,6 +74,22 @@ impl<'a> WeightScaleDrv<'a> {
             .start(self.addr)
             .await
             .map(|_| ())
+    }
+
+    pub async fn read_version(&mut self) -> Result<Version, Error> {
+        let buf = self.twim
+            .transfer()?
+            .write_byte(Command::GetVersion as u8)?
+            .read(5)?
+            .start(self.addr)
+            .await?;
+
+        Ok(Version{
+            major: buf[0],
+            minor: buf[1],
+            patch: buf[2],
+            hash: (buf[3] as u16) | ((buf[4] as u16) << 8),
+        })
     }
 
     pub async fn read_temperature(&mut self) -> Result<i8, Error> {
