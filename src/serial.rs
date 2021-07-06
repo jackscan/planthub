@@ -82,7 +82,7 @@ pub type TwiAddr = twim::Address;
 #[derive(defmt::Format, Debug, Default)]
 pub struct TwiData {
     pub len: u8,
-    pub buf: [u8; 7],
+    pub buf: [u8; 16],
 }
 
 #[derive(defmt::Format, Debug)]
